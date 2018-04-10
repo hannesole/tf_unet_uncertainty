@@ -1,5 +1,5 @@
 #!/bin/bash
-#PBS -N std_py_debug
+#PBS -N std_py
 #PBS -S /bin/bash
 #PBS -l nodes=1:nvidiaTITANX:ppn=16,gpus=1,walltime=23:59:59
 #PBS -q student
@@ -8,8 +8,10 @@
 #PBS -j oe
 #might want to change to nodes=1:nvidiaTITAN:ppn=1,gpus=1,walltime=23:59:59 to train on Titan only
 #or use hostlist=^chip+chap+dicky+ducky+rattcapone+summi+track+trixi+william,nodes=1:nvidiaMin12GB:ppn=12,gpus=1,walltime=23:59:59
-export SCRIPT_NAME=std_unet_dev.py
-export MODE=traindebug
+
+# usage in commandline: bashscript.sh mode
+export SCRIPT_NAME=std_unet.py
+export MODE=train
 export TRAIN_FOLDER=/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/output_scr
 
 #source /misc/software/cuda/add_environment_cuda9.0.176_cudnnv7.sh      # used for Tensorflow >= 1.5.0

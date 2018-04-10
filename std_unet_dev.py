@@ -101,27 +101,27 @@ args = parser.parse_args()
 def _________________________OPTIONS___________________________(): pass # dummy function for PyCharm IDE
 # Since I usually call this from an IDE, not all script arguments are implemented as commandline arguments.
 # You can also override commandline defaults here.
-class opts(object):
+class opts(object): #TODO Outsource to opts / config file
     # wrapper class for all options (similar to a C++ struct)
     # -> General
     debug = True if args.mode is None else ('debug' in args.mode)
     tfdbg = False if args.mode is None else ('tfdbg' in args.mode)
     copy_script_dir = 'train_dir'
 
-    # -> Training & Testing
-    shuffle = False  # shuffle data input
+    # ---------> Training & Testing
+    shuffle = True  # shuffle data input
     augment = True  # randomly augment data input
-    resample_n_train = 50000  # resample same image to use always the same image in training
-    batch_size = 8  # simultaneous processing of batch_size images (GPU mem is limit)
+    resample_n_train = None  # resample same image to use always the same image in training
+    batch_size = 1  # simultaneous processing of batch_size images (GPU mem is limit)
 
     # working configurations for 12 GB GPU RAM:
     # size 512x512: batch_size= 1 | 2 | 8 ; n_start_features= 64 | 64 | 16
     n_contracting_blocks = 5
-    n_start_features = 16
+    n_start_features = 64
     resize = [512, 512] # None
-    resize_method = None # "scale" or "random_crop" (default)
+    resize_method = None # "scale" # None # "scale", "center_crop" or "random_crop" (default)
 
-    norm_fn = None # tc.layers.batch_norm  # None #
+    norm_fn = None # tc.layers.batch_norm  #
     normalizer_params = {'is_training': None,   # set to None if it should correspond to Phase
                          'decay': 0.9,          # more stable than default (0.999)
                          'zero_debias_moving_mean': True } # for stability
@@ -131,12 +131,12 @@ class opts(object):
     shape_label = [1024, 1024, 1]  # of a single label mask
     shape_weights = [1024, 1024, 1]  # of a single weight mask
 
-    # -> Training
+    # ---------> Training
     train = True if args.mode is None else ('train' in args.mode)  # script will train
     train_name = 'augment_saver'
     init_learning_rate = 0.0001  # initial learning rate
-    max_iter = 20000  # maximum iterations
-    keep_prob = 1.  # dropout - 1
+    max_iter = 60000  # maximum iterations
+    keep_prob = 0.9  # dropout - 1
     optimizer = 'Adam'
 
     prefetch_n = batch_size * 20
@@ -144,54 +144,38 @@ class opts(object):
 
     saver_interval = 1000
 
-    # -> Testing
+    # ---------> Testing
     test = True if args.mode is None else ('test' in args.mode)  # script will do testing
-    n_samples = 10  # ... of n_samples
-    resample_n = 100   # resample same image to calculate uncertainty, N or None
-    keep_prob_test = 1.0 # keep_prob  # use 1.0 for no dropout during test-time
+    n_samples = 20       # ... of n_samples
+    resample_n = 20    # resample same image to calculate uncertainty, N or None
+    if resample_n is not None: resize_method = "scale" # "center_crop"
+    keep_prob_test = keep_prob  # use 1.0 for no dropout during test-time
     pass
 
 # -> Override CLI arguments (for convenience when running from IDE)
 PROJECT_DIR = '/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/'
 
 #args.output_dir = '/home/hornebeh/proj_tf_unet/output/'
-args.name = 'unet_' + time.strftime("%Y-%m-%d_%H%M") + '_debug_no_batch_norm'
+args.name = 'unet_' + time.strftime("%Y-%m-%d_%H%M") + '_sh-aug-kp09-60k'
 #args.name = 'overwrite'
 
-#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-03-25_1904_augment'
-#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-03-26_1835_alleatoric'
-#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-03-27_1225_debug'
-#/home/hornebeh/proj_tf_unet/output/unet_2018-03-28_0859_debug/recovery_checkpoints/snapshot-3999
-#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-03-28_1847_debug_save'
-#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-03-29_1833_debug_nn'
+#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1409_debug_batch_norm'
+#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1425_debug_no_batch_norm'
+args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1713_sh-aug-kp1-60k'
+args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1717_sh-aug-kp09-60k'
 
 #args.train_dir = PROJECT_DIR + 'output_scr/' + 'unet_2018-03-25_2021_augment_saver'
 #args.train_dir = PROJECT_DIR + 'output_scr/' + 'unet_2018-03-28_1813_debug_no_droput'
 
-#args.checkpoint = PROJECT_DIR + 'output/' + unet_2018-03-25_1904_augment/checkpoints/snapshot-4000"
 #args.checkpoint = PROJECT_DIR + 'output_scr/' + unet_2018-03-22_2021_augment/checkpoints/snapshot-34000"
+#args.checkpoint = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1425_debug_no_batch_norm/checkpoints/snapshot-4000'
+
 
 opts.data_layer_type = 'hdf5'
 args.dataset = PROJECT_DIR + "data/hdf5/std_data_v0_2_pdf/train/merged/train_dset_chunked.h5"
 opts.shape_img = [1024, 1024, 4]
 opts.shape_label = [1024, 1024, 1]
 opts.shape_weights = [1024, 1024, 1]
-
-# opts.data_layer_type = 'tfrecords'
-# args.dataset = "/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/"+ \
-#                "data/tfrecord/1024x1024_rgbi/test.tfrecords"
-# opts.shape_img = [1024, 1024, 4]
-# opts.shape_label = [1024, 1024, 1]
-
-# args.dataset = "/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/"+ \
-#                "data/tfrecord/1024x1024_rgb/train.tfrecords"
-# opts.shape_img = [1024, 1024, 3]
-# opts.shape_label = [1024, 1024, 1]
-
-# args.dataset = "/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/"+ \
-#                "data/tfrecord/256x256_rgb/train.tfrecords"
-# opts.shape_img = [256, 256, 3]
-# opts.shape_label = [256, 256, 1]
 
 def opts_to_str(opts):
     '''Prints the opts class as box with all settings'''
@@ -212,7 +196,7 @@ def opts_to_str(opts):
 # -------------------
 
 # if opts.debug: logging.debug(str(os.environ))    # log environment (to check whether CUDA paths are set correctly etc.)
-if opts.debug: logging.debug('os.uname: %s' % (str(os.uname())))  # log uname to check which node code is running on
+logging.debug('os.uname: %s' % (str(os.uname())))  # log uname to check which node code is running on
 
 tf_config = tf.ConfigProto(log_device_placement=False)
 if 'dacky' in os.uname()[1]:
@@ -277,7 +261,7 @@ if opts.copy_script_dir is not None:
     shutil.copy(__file__, copy_file_path)
     logging.debug('Copied py source to: ' + copy_file_path)
 
-
+# output opts to console
 print(opts_to_str(opts))
 
 # ######################################################################################################################
@@ -353,7 +337,8 @@ def train_core(sess, net):
 
     # set train_op and summaries
     logging.info('Create Training step (set loss, summary and global_step)')
-    train_op, global_step, loss, merged_summary = net.create_train_op(opts.init_learning_rate, opts.optimizer)
+    train_op, global_step, loss, merged_summary = \
+        net.create_train_op(opts.init_learning_rate, opts.optimizer, img_summary=True)
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
     initialize_uninitialized(sess)
@@ -406,7 +391,8 @@ def train_debug(sess, net):
 
     # set train_op and summaries
     logging.info('Create Training step (set loss, summary and global_step)')
-    train_op, global_step, loss, merged_summary = net.create_train_op(opts.init_learning_rate, opts.optimizer)
+    train_op, global_step, loss, merged_summary = \
+        net.create_train_op(opts.init_learning_rate, opts.optimizer, img_summary=True)
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
     initialize_uninitialized(sess)
@@ -465,7 +451,8 @@ def train_own(sess, net):
 
     # set train_op and summaries
     logging.info('Create Training step (set loss, summary and global_step)')
-    train_op, global_step, loss, merged_summary = net.create_train_op(opts.init_learning_rate, opts.optimizer)
+    train_op, global_step, loss, merged_summary = \
+        net.create_train_op(opts.init_learning_rate, opts.optimizer, img_summary=True)
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
     initialize_uninitialized(sess)
@@ -625,25 +612,11 @@ def test_debug(sess, net_test):
     logging.info('#               Starting Testing (debug)        #')
     logging.info('#-----------------------------------------------#')
 
-    CHECKPOINTS_DIR = 'save'
-    save_dir = os.path.join(train_dir, CHECKPOINTS_DIR) # train_dir + os.sep + "save"
-    save_path = os.path.join(save_dir, "model.ckpt") # save_dir + os.sep + "model.ckpt"
-    saver = tf.train.Saver()
-
     # load model for testing (if None provided, searches in train_dir, if not found doesn't load)
-    if os.path.exists(save_dir):
-        try:
-            logging.info("Attempt restore safe debug model from: %s" % save_dir)
-            saver.restore(sess, save_dir + os.sep + "model.ckpt")
-            chkpt_loaded = True
-            logging.info(" -- Restored --")
-        except:
-            logging.info("Attempt restore with SimpleTrainer load from: %s" % args.checkpoint)
-            # load model for continued training (if None provided, searches in train_dir, if not found doesn't load)
-            trainer = SimpleTrainer(session=sess, train_dir=train_dir)
-            chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
-    else:
-        chkpt_loaded = False
+    logging.info("Attempt restore with SimpleTrainer load from: %s" % args.checkpoint)
+    # load model for continued training (if None provided, searches in train_dir, if not found doesn't load)
+    trainer = SimpleTrainer(session=sess, train_dir=train_dir)
+    chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
 
     # init variables if no checkpoint was loaded
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
@@ -773,7 +746,7 @@ if opts.test:
     # create network graph with data layer
     net = model.UNet(dataset_pth=args.dataset,
                      shape_img=opts.shape_img, shape_label=opts.shape_label, shape_weights=opts.shape_weights,
-                     batch_size=opts.batch_size, shuffle=False, augment=True,
+                     batch_size=opts.batch_size, shuffle=False, augment=False,
                      resize=opts.resize, resize_method=opts.resize_method,
                      data_layer_type=opts.data_layer_type,
                      n_contracting_blocks=opts.n_contracting_blocks, n_start_features=opts.n_start_features,
@@ -885,6 +858,8 @@ if opts.debug and False: # temporarily disabled
         elif opts.data_layer_type == 'hdf5_dset' or opts.data_layer_type == 'hdf5_tables':
             with_queues_and_loaders(sess, DEBUG_core)
 
-logging.info('#-X---------------------------------------------#')
-logging.info('#               Finish Debugging                #')
-logging.info('#-----------------------------------------------#')
+    logging.info('#-X---------------------------------------------#')
+    logging.info('#               Finish Debugging                #')
+    logging.info('#-----------------------------------------------#')
+
+logging.info('\n\n ... done :)')

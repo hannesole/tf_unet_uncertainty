@@ -129,7 +129,7 @@ class UNet():
 
     # #########   TRAIN OPERATION    #########
     # ----------------------------------------
-    def create_train_op(self, learning_rate, summary_imgs=False, optimizer='Adam'):
+    def create_train_op(self, learning_rate, optimizer='Adam', img_summary=True):
         '''
         Creates train op with loss, learning rate and optimization parameters.
         Includes creating summaries.
@@ -141,11 +141,11 @@ class UNet():
         def resizer(image_batch, size=[256, 256]):
             return tf.image.resize_images(image_batch, size) if self.resize is None else image_batch
 
-        with tf.variable_scope('train_op'):
+        with tf.variable_scope('Train_op'):
             self.global_step = tf.train.get_or_create_global_step()
 
-            if summary_imgs:  # takes a lot of space
-                with tf.variable_scope('summary_imgs'):
+            if img_summary:  # takes a lot of space
+                with tf.variable_scope('img_summary'):
                     tf.summary.image('0_img', resizer(self.batch_img[..., 0:3]))
                     tf.summary.image('0_label', resizer(tf.cast(self.batch_label, tf.float32)))
                     tf.summary.image('0_weights', resizer(self.batch_weights))
@@ -157,7 +157,7 @@ class UNet():
                     tf.summary.image('3_softmax_c1', resizer(softmax[..., 1, np.newaxis]))
                     max_softmax = tf.argmax(softmax, axis=-1)
                     max_softmax = tf.cast(max_softmax, dtype=tf.float32)
-                    tf.summary.image('1_max_softmax', resizer(max_softmax[..., np.newaxis]))
+                    tf.summary.image('1_segmentation', resizer(max_softmax[..., np.newaxis]))
 
 
             # LOSS FUNCTIONS
@@ -168,8 +168,8 @@ class UNet():
                 # before tf.one_hot, tf.squeeze removes (empty) last dim, otherwise shape will be (batch_size, x, y, 1, n_classes):
                 self.batch_label = tf.one_hot(tf.squeeze(self.batch_label, axis=-1), self.n_class, axis=-1)
 
-                # if summary_imgs:
-                #     with tf.variable_scope('summary_imgs'):
+                # if img_summary:
+                #     with tf.variable_scope('img_summary'):
                 #         tf.summary.image('label_one_hot_c0', tf.image.resize_images(self.batch_label[..., 0, np.newaxis], [256, 256]))
                 #         tf.summary.image('label_one_hot_c1', tf.image.resize_images(self.batch_label[..., 1, np.newaxis], [256, 256]))
 
@@ -184,8 +184,8 @@ class UNet():
                     # weighted loss
                     loss_softmaxCE_w = tf.multiply(loss_softmaxCE, self.batch_weights)
 
-                    if summary_imgs:
-                        with tf.variable_scope('summary_imgs'):
+                    if img_summary:
+                        with tf.variable_scope('img_summary'):
                             tf.summary.image('softmax_CE', resizer(loss_softmaxCE))
                             tf.summary.image('softmax_CE_weighted', resizer(loss_softmaxCE_w))
 
@@ -232,8 +232,8 @@ class UNet():
             #
             #         loss_al = loss_al - tf.boolean_mask(sample_corrupt_logits, label_one_hot) + tf.log(loss_al_inner)
             #
-            # if summary_imgs:  # takes a lot of space
-            #     with tf.variable_scope('summary_imgs'):
+            # if img_summary:  # takes a lot of space
+            #     with tf.variable_scope('img_summary'):
             #         tf.summary.image('sigma_c0', tf.image.resize_images(
             #             self.sigma[..., 0, np.newaxis], [256, 256]))
             #         tf.summary.image('sigma_c0', tf.image.resize_images(
@@ -283,7 +283,7 @@ class UNet():
 
     # #########   TEST OPERATION     #########
     # ----------------------------------------
-    def create_test_op(self, session, summary_imgs=False):
+    def create_test_op(self, session, img_summary=True):
         '''
         Creates test op with loss and summaries.
 
@@ -293,8 +293,8 @@ class UNet():
         with tf.variable_scope('test_op'):
             self.global_step = tf.train.get_or_create_global_step()
 
-            if summary_imgs:  # takes a lot of space on disk when wrting images
-                with tf.variable_scope('summary_imgs'):
+            if img_summary:  # takes a lot of space on disk when wrting images
+                with tf.variable_scope('img_summary'):
                     tf.summary.image('img', tf.image.resize_images(self.batch_img[..., 0:3], [256, 256]))
                     tf.summary.image('label',
                                      tf.image.resize_images(tf.cast(self.batch_label, tf.float32), [256, 256]))
@@ -312,8 +312,8 @@ class UNet():
                 # before tf.one_hot, tf.squeeze removes (empty) last dim, otherwise shape will be (batch_size, x, y, 1, n_classes):
                 self.batch_label = tf.one_hot(tf.squeeze(self.batch_label, axis=-1), self.n_class, axis=-1)
 
-                # if summary_imgs:
-                #     with tf.variable_scope('summary_imgs'):
+                # if img_summary:
+                #     with tf.variable_scope('img_summary'):
                 #         tf.summary.image('label_one_hot_c0', tf.image.resize_images(self.batch_label[..., 0, np.newaxis], [256, 256]))
                 #         tf.summary.image('label_one_hot_c1', tf.image.resize_images(self.batch_label[..., 1, np.newaxis], [256, 256]))
 
@@ -328,8 +328,8 @@ class UNet():
                     # weighted loss
                     loss_softmaxCE_w = tf.multiply(loss_softmaxCE, self.batch_weights)
 
-                    if summary_imgs:
-                        with tf.variable_scope('summary_imgs'):
+                    if img_summary:
+                        with tf.variable_scope('img_summary'):
                             softmax = tf.nn.softmax(logits=self.output_mask)
                             tf.summary.image('softmax_c0',
                                              tf.image.resize_images(softmax[..., 0, np.newaxis], [256, 256]))
@@ -430,6 +430,13 @@ class UNet():
                     self.batch_label = tf.image.resize_images(self.batch_label, resize)
                     self.batch_label = tf.cast(self.batch_label, tf.uint8) # is changed by resize
                     self.batch_weights = tf.image.resize_images(self.batch_weights, resize)
+                elif resize_method == "center_crop":
+                    self.batch_img = tf.map_fn(lambda img: tf.image.central_crop(img, 0.5),
+                                              self.batch_img, parallel_iterations=8, name="center_crop")
+                    self.batch_label = tf.map_fn(lambda img: tf.image.central_crop(img, 0.5),
+                                              self.batch_label, parallel_iterations=8, name="center_crop")
+                    self.batch_weights = tf.map_fn(lambda img: tf.image.central_crop(img, 0.5),
+                                              self.batch_weights, parallel_iterations=8, name="center_crop")
                 else:
                     random_seed = 42 # tf.random_uniform(1, minval=0, maxval=65536, dtype=tf.int16)
                     self.batch_img = tf.random_crop(self.batch_img,
@@ -497,8 +504,6 @@ class UNet():
                 return self.output_mask, self.sigma, self.prediction
             else:
                 return self.output_mask, self.sigma, None
-
-
 
 
     @property

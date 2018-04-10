@@ -137,8 +137,11 @@ def augment(img, label, weights, p=0.5):
         label_aug.astype(original_dtypes[1]), \
         weights_aug.astype(original_dtypes[2])
 
+
+
+import tensorflow as tf
 # data augmentation from CIFAR10
-def _preproc_Augment(img, label, debug=False):
+def _preproc_Augment(img, label, output_height, output_width, add_image_summaries=True, debug=False):
     if debug:
         tf.summary.image('image', img)
 
