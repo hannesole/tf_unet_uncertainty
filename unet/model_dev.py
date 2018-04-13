@@ -36,6 +36,7 @@ class UNet():
                  data_layer_type='tfrecords',
                  batch_size=1, shuffle=False, augment=False,
                  prefetch_n=None, prefetch_threads=None,
+                 aleatoric_samples=None,
                  resample_n=None,
                  copy_script_dir=None, debug=False  # other stuff
                  ):
@@ -74,6 +75,8 @@ class UNet():
         self.shuffle = shuffle
         self.batch_size = batch_size
 
+        self.aleatoric_samples = aleatoric_samples
+
         self.init_objects = []  # data layer may generate objects to be initialized
         self.close_objects = []  # ... or closed when creating a session
 
@@ -107,6 +110,7 @@ class UNet():
             = self._build_net(self.batch_img, n_class=self.n_class,
                               n_features_start=n_start_features, n_blocks_down=n_contracting_blocks,
                               is_training=self.is_training, keep_prob=self.keep_prob,
+                              aleatoric_samples = aleatoric_samples,
                               norm_fn=norm_fn, normalizer_params=normalizer_params
                               )
         logging.info('Created UNet with Input size %s and Output Tensor %s' % (str(shape_img), str(self.output_mask)))
@@ -196,70 +200,59 @@ class UNet():
 
 
                 # set loss used for optimization
-                self.loss = loss_softmaxCE_w
-                tf.summary.scalar('loss/optimize_loss', self.loss)
+                if self.aleatoric_samples is None:
+                    self.loss = loss_softmaxCE_w
+                    tf.summary.scalar('loss/optimize_loss', self.loss)
             # ------------------------
 
             # # UNCERTAINTY
             # # --------------
-            # with tf.variable_scope('uncertainty'):
-            #
-            #     #label = self.batch_label_idx
-            #     label_one_hot = tf.cast(self.batch_label, tf.bool)# [batch_size, x, y, classes]
-            #     logits = self.output_mask  # [batch_size, x, y, classes]
-            #     sigma = self.sigma  # tf.ones(shape=tf.shape(logits), dtype=logits.dtype) # [1, x, y, classes]
-            #     #sigma = tf.RandomNormal(shape=tf.shape(logits), dtype=logits.dtype)
-            #
-            #     def corrupt_logits(logits, sigma):
-            #         gaussian = tf.random_normal(tf.shape(logits), mean=0.0, stddev=1.0, dtype=logits.dtype)
-            #         noise = tf.multiply(gaussian, sigma) #
-            #         return tf.add(logits, noise)
-            #
-            #
-            #
-            #     # logits_true_class = tf.gather_nd(logits, tf.cast(label, dtype=tf.int32))
-            #     logits_true_class = tf.boolean_mask(logits, label_one_hot)
-            #
-            #     #def loss_alleatoric(logits, sigma, label_one_hot):
-            #     T = 20
-            #     loss_al = 0
-            #     for t in range(T):
-            #         sample_corrupt_logits = corrupt_logits(logits, sigma)
-            #
-            #         loss_al_inner = 0
-            #         for c in range(logits.shape[-1]):
-            #             loss_al_inner = loss_al + tf.exp(sample_corrupt_logits)
-            #
-            #         loss_al = loss_al - tf.boolean_mask(sample_corrupt_logits, label_one_hot) + tf.log(loss_al_inner)
-            #
-            # if img_summary:  # takes a lot of space
-            #     with tf.variable_scope('img_summary'):
-            #         tf.summary.image('sigma_c0', tf.image.resize_images(
-            #             self.sigma[..., 0, np.newaxis], [256, 256]))
-            #         tf.summary.image('sigma_c0', tf.image.resize_images(
-            #             self.sigma[..., 1, np.newaxis], [256, 256]))
-            #         tf.summary.image('corrupt_prediction_c0', tf.image.resize_images(
-            #             sample_corrupt_logits[..., 0, np.newaxis], [256, 256]))
-            #         tf.summary.image('corrupt_prediction_c0', tf.image.resize_images(
-            #             sample_corrupt_logits[..., 1, np.newaxis], [256, 256]))
+            if self.aleatoric_samples is not None:
+                with tf.variable_scope('uncertainty'):
+                    label_one_hot = self.batch_label # [batch_size, x, y, classes]
+                    label_one_hot_negated = (label_one_hot - 1)*(-1) # [batch_size, x, y, classes]
+                    logits = self.output_mask  # [batch_size, x, y, classes]
+                    sigma = self.sigma  # [batch_size, x, y, classes] or [1, x, y, classes] or [1, x, y, 1]
 
-                #          logits = tf.constant([[.1, .2, .7],
-                #                                [.3, .4, .3]])
-                #          label_one_hot = tf.constant([[0, 0, 1],
-                #                                       [0, 1, 0]])
-                #          label_one_hot = tf.constant([[0, 0, 1],
-                #                                       [0, 1, 0]])
-                #          C = tf.constant([3, 1])
-                #
-                #          V = logits[b, x, y, c]
-                #
-                # [[['b0x0y0c0', 'b0x1y0c0']   ['b0x0y0c1' 'b0x1y0c1'
-                #  ['b0x0y1c0' 'b0x1y1c0']]   'b0x0y1c1' 'b0x1y1c1']
-                #
-                #  ['b1x0y0c0' 'b1x1y0c0'   ['b1x0y0c1' 'b1x1y0c1'
-                #  'b1x0y1c0' 'b1x1y1c0']   'b1x0y1c1' 'b1x1y1c1']]
-                #
-                #          labels[b, x, y, c]
+                    def sample_corrupt_logits(logits, sigma, sample_n):
+                        # this makes use of N(0,sigma**2) = N(0,1) * sigma
+                        # for easy computation of the corruption
+                        new_shape = [sample_n, tf.shape(logits)[0], tf.shape(logits)[1],
+                                     tf.shape(logits)[2], tf.shape(logits)[3]]
+                        # generating standard noise
+                        gaussian = tf.random_normal(new_shape, mean=0.0, stddev=1.0, dtype=logits.dtype)
+                        # "weighting" noise with sigma
+                        noise = tf.multiply(gaussian, sigma)
+                        # adding noise to logits
+                        return tf.add(logits, noise)
+
+                    # created [aleatoric_samples] of corrupted logits
+                    sampled_logits = sample_corrupt_logits(logits, sigma, self.aleatoric_samples) # [samples, batch_size, x, y, classes]
+
+                    # mask with one_hot_labels (but keep dims)
+                    logits_true_class = tf.multiply(sampled_logits, label_one_hot)
+                    logits_other_classes = tf.multiply(sampled_logits, label_one_hot_negated)
+
+                    # reduced since all other entries are 0 (because of one_hot_label_mask)
+                    true_class = tf.reduce_sum(logits_true_class, axis=-1, keep_dims=True)
+                    # sum over other classes
+                    sum1_other_classes = tf.log(tf.reduce_sum(tf.exp(logits_other_classes), axis=-1, keep_dims=True))
+                    # sum over and divide by number of samples
+                    sum2_samples = tf.reduce_mean(sum1_other_classes - true_class, axis=0)
+                    # sum over and divide by number of pixels
+                    loss_aletaoric = tf.reduce_mean(sum2_samples)
+
+                    self.loss = loss_aletaoric
+                    tf.summary.scalar('loss/optimize_loss', self.loss)
+
+                if img_summary:  # takes a lot of space
+                    with tf.variable_scope('img_summary_uncertainty'):
+                        tf.summary.image('1_sigma_c0', resizer(self.sigma[..., 0, np.newaxis]))
+                        tf.summary.image('1_sigma_c1', resizer(self.sigma[..., 1, np.newaxis]))
+                        averaged_sampled_logits = tf.reduce_mean(sampled_logits, axis=0)
+                        tf.summary.image('0_corrupt_prediction_c0', resizer(averaged_sampled_logits[..., 0, np.newaxis]))
+                        tf.summary.image('0_corrupt_prediction_c1', resizer(averaged_sampled_logits[..., 1, np.newaxis]))
+
 
             # LEARNING RATE
             with tf.variable_scope('learning_rate'):
@@ -455,7 +448,7 @@ class UNet():
     # #########   NETWORK GRAPH    #########
     # --------------------------------------
     def _build_net(self, output_prev_layer, n_features_start, n_blocks_down, is_training, keep_prob, n_class,
-                   norm_fn=None, normalizer_params=None):
+                   aleatoric_samples=None, norm_fn=None, normalizer_params=None):
         '''
         Parametrized build of Unet model (flexible in depth and number of features)
 
@@ -497,7 +490,10 @@ class UNet():
         with tf.variable_scope('UNet/output_mask'):
             # self.output_mask = fully connected layer at the end
             self.output_mask = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
-            self.sigma = 0  # tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None, name="sigma")
+            if aleatoric_samples is not None:
+                self.sigma = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
+            else:
+                self.sigma = None
 
             if True: # not self.is_training:
                 self.prediction = tf.argmax(tf.nn.softmax(self.output_mask), axis=-1, output_type=tf.int32)
