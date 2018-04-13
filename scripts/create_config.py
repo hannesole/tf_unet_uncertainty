@@ -45,7 +45,7 @@ config['normalizer_params'] = OrderedDict([
     ('zero_debias_moving_mean', 'True')       # for stability
 ])
 
-config['TRAINING'] = OrderedDict([
+config['TRAIN'] = OrderedDict([
     ('train_name' , 'augment_saver'),
     ('init_learning_rate' , '0.0001'),    # initial learning rate
     ('max_iter' , '60000'),   # maximum iterations
@@ -58,7 +58,7 @@ config['TRAINING'] = OrderedDict([
     ('saver_interval' , '1000')
 ])
 
-config['TESTING'] = OrderedDict([
+config['TEST'] = OrderedDict([
     ('n_samples' , str(20)),      # ... of n_samples
     ('resample_n' , str(20)),     # resample same image to calculate uncertainty, N or None
     ('resize_method' , "scale"),  # "center_crop"
