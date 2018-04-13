@@ -1,6 +1,6 @@
 # HDF5 DATA LIB
 # =============
-# Functions to build and modify hdf5 files. Mainly to merge split hdf5 files into one,
+# Functions to build and modify hdf5 files. Mainly to merge multiple hdf5 files into one,
 # either using a table structure or maintaining the dset structure.
 #
 # Author: Hannes Horneber
@@ -198,7 +198,7 @@ def _fill_table(datasources, val_keys, element_axis, table_row, cache_full_file=
 
 
 def merge_hdf5(hdf5_folder, dest_folder=None, dest_filename=None, datasources=None, element_axis=0, validate=False,
-               build_table=False, chunks=False):
+               build_table=False, chunks=None):
     '''
     Merges HDF5 files into one file.
     Assumes that all files contain the same datasets with the same shapes and dtypes, if assumption is not safe,
@@ -446,3 +446,128 @@ def test_hdf5(data_path=None, output_dir=None, shape_img=[1024, 1024, 3], shape_
 
     reader.close()
     sess.close()
+
+
+import numpy as np
+def blockshaped(arr, nrows, ncols):
+    """
+    Return an array of shape (n, nrows, ncols) where
+    n * nrows * ncols = arr.size
+
+    If arr is a 2D array, the returned array should look like n subblocks with
+    each subblock preserving the "physical" layout of arr.
+    """
+    h, w = arr.shape
+    return (arr.reshape(h//nrows, nrows, -1, ncols)
+               .swapaxes(1,2)
+               .reshape(-1, nrows, ncols))
+
+
+def cubify(arr, newshape):
+    oldshape = np.array(arr.shape)
+    repeats = (oldshape / newshape).astype(int)
+    tmpshape = np.column_stack([repeats, newshape]).ravel()
+    order = np.arange(len(tmpshape))
+    order = np.concatenate([order[::2], order[1::2]])
+    # newshape must divide oldshape evenly or else ValueError will be raised
+    return arr.reshape(tmpshape).transpose(order).reshape(-1, *newshape)
+
+
+def split_into_sets(hdf5_folder, dest_folder=None, datasources=None,
+                     element_axis=0, validate=False,
+                     chunks=None):
+        '''
+        For tiling contents of a HDF5 file into smaller tiles and splitting them up into
+        train/test/val set.
+
+        :param hdf5_folder: folder containing hdf5 files to be merged.
+        If the datasources parameter is explicitly given (AND dest_folder is not set) this folder will be used as dest_folder.
+        If both are set, this parameter is actually obsolete (still not optional for safety though).
+        :param dest_folder: (optional) folder to store the resulting merged HDF5 file. By default this is the same as hdf5folder.
+        :param datasources: (optional) list of hdf5 files to be merged. By default this will be generated from files in hdf5folder.
+        :param element_axis: (optional) shape dimension (axis) that represents elements. By default 0 (the first dim).
+        :param build_table: (optional) merges data into a table ('data_table') with keys as columns. By default False.
+        :param chunks: (optional) writes dset in chunked mode. Chunksize is guessed. By default False.
+        :return: Returns string with full path to created file
+        '''
+        if dest_folder is None:
+            dest_folder = hdf5_folder
+        if datasources is None:
+            datasources = _find_hdf5_files(hdf5_folder)
+
+        # generate save path for resulting file
+        dest_trainfile = dest_folder + os.sep + 'trainset.h5'
+        dest_testfile = dest_folder + os.sep + 'testset.h5'
+        dest_valfile = dest_folder + os.sep + 'valset.h5'
+
+        logging.info('build_hdf5_file >> splitting %s file(s): \n %s' % (str(len(datasources)), str(datasources)))
+        logging.info(' >> saving to: \n%s \n%s \n%s ' % (dest_trainfile, dest_testfile, dest_valfile))
+
+        # validation is optional
+        if validate: val_keys, val_dsets, element_axis = _validate_datasources(datasources, element_axis=element_axis)
+
+        # get key, dtype and shapes of elements per dataset from the datasource files
+        val_keys, dtypes, element_shapes = _get_dtypes(datasources, element_axis=element_axis,
+                                                       keys=val_keys if 'myVar' in locals() else None)
+
+        logging.info('  >> keys %s: ' % str(val_keys))
+        logging.info('  >> dtypes %s: ' % str(dtypes))
+        logging.info('  >> element shapes %s: ' % str(element_shapes))
+
+        # simply merge datasets
+        for key in val_keys:
+            first = True
+            # read and concatenate data from all files
+            for hdf5_file in datasources:
+                f = h5py.File(hdf5_file, 'r')
+                if first:
+                    full_dset = f[key][:]
+                    logging.info('    >> init dset [%s]: %s' % (key, str(full_dset.shape)))
+                    first = False
+                else:
+                    full_dset = np.concatenate((full_dset, f[key][:]), axis=element_axis)
+                    logging.info('    >> growing dset [%s]: %s' % (key, str(full_dset.shape)))
+                f.close()  # all reading done, go to next file
+
+            # now split
+            logging.info('    >> full dset [%s]' % (str(full_dset.shape)))
+
+            newshape = [full_dset.shape[1],  # cutting w/h in half
+                        full_dset.shape[2] // 2, full_dset.shape[3] // 2 ] # depth (n_channels) should be preserved
+
+            for el in range(full_dset.shape[element_axis]):
+                split = cubify(full_dset[el, ...], newshape)
+                if el == 0:
+                    train_dset = split[1:3, ...]
+                    test_dset = split[np.newaxis, 0, ...]
+                    val_dset = split[np.newaxis, 3, ...]
+                else:
+                    train_dset = np.concatenate((train_dset, split[1:3, ...]), axis=element_axis)
+                    test_dset = np.concatenate((test_dset, split[np.newaxis, 0, ...]), axis=element_axis)
+                    val_dset = np.concatenate((val_dset, split[np.newaxis, 3, ...]), axis=element_axis)
+                #logging.info('    >> growing train [%s]' % (str(train_dset.shape)))
+
+            modes = ['train', 'test', 'val']
+
+            for i_mode in modes:
+                (write_dset, write_filename) = {
+                    'train': (train_dset, dest_trainfile),
+                    'test':  (test_dset, dest_testfile),
+                    'val': (val_dset, dest_valfile)
+                }[i_mode]
+
+                # write concatenated (merged) dset to output file
+                fo = h5py.File(write_filename, 'a')
+                logging.info('    >> writing dset [%s] [%s] to: %s' % (key, str(write_dset.shape), write_filename))
+                fo.create_dataset(key, data=write_dset, chunks=chunks)
+                fo.close()
+
+            # # write concatenated (merged) dset to output file
+            # fo_train = h5py.File(dest_trainfile, 'a')
+            # logging.info('    >> writing dset [%s] to: %s' % (key, dest_trainfile))
+            # fo_train.create_dataset(key, data=train_dset, chunks=chunks)
+            # fo_train.close()
+
+        return dest_trainfile, dest_testfile, dest_valfile
+
+
