@@ -151,140 +151,6 @@ def data_TFRqueue(data_path, shape_img, shape_label=None, shape_weights=None,
         else: return imgs, None, None
 
 
-# #########         HDF5         #########
-# ----------------------------------------
-def data_HDF5Queue(data_path, is_training=False, shuffle=False, batch_size=1):
-    '''
-    Adds a HDF5record data layer to your model graph.
-    The layer reads from a single HDF5 datafile and expects dsets '/data' '/label' and '/weights' in the file.
-
-    This offers a pre-processing hook that can be used to transform data before feeding it to the network.
-
-    To use this in your model, make sure you add the following commands when running your session:
-        with tf.Session() as sess:
-            with loader.begin(sess):
-                for _ in range(N):
-                    sess.run(result)
-        reader.close()
-
-    ...
-
-    :param data_path: path to data
-    :param is_training: (optional) by default False
-    :param batch_size: (optional) by default 1
-    :param shuffle: (optional) by default False
-    :return: a reader object that needs to be closed after running the session, the data
-    '''
-    logging.info("DataLayer HDF5Records Queue | from %s " % (data_path))
-
-    # TODO change this to support providing multiple filenames
-    reader = tftables.open_file(filename=data_path, batch_size=batch_size)
-
-    # Use get_batch to access all arrays. Datasets (/data, /label and /weights) must be accessed in ordered mode.
-    batch_img_r = reader.get_batch('/data', ordered=True)
-    # TODO only load label/weights data if not is_training
-    batch_label_r = reader.get_batch('/label', ordered=True)
-    batch_weights_r = reader.get_batch('/weights', ordered=True)
-
-    #################################
-    # PREPROCESS HOOK               #
-    # Any pre-processing here ...   #
-    #################################
-    # do some pre-processing since (my) data in HDF5 files is stored for caffe compatibility, not Tensorflow
-    # make sure all data has 4 dimensions (to fit the 4D-Tensor style [batch_size, x, y, channels])
-    [batch_img_r, batch_label_r, batch_weights_r], _ = unify_ndims([batch_img_r, batch_label_r, batch_weights_r], ndims=4)
-    # do some pre-processing since (my) data in HDF5 files is stored for caffe compatibility, not Tensorflow
-    batch_img_r, batch_label_r, batch_weights_r = _preproc_tf_HDF5Data(batch_img_r, batch_label_r, batch_weights_r)
-    logging.info("  | shapes: img %s | label %s | weights %s" %
-        (str(batch_img_r.shape), str(batch_label_r.shape), str(batch_weights_r.shape)))
-    # further pre-processing can be added here
-
-    # The loader takes a list of tensors to be stored in the queue (in ordered mode, threads should be 1).
-    loader = reader.get_fifoloader(
-        queue_size=10,
-        inputs=[batch_img_r, batch_label_r, batch_weights_r],
-        threads=1)
-
-    # Batches are taken out of the queue using a dequeue operation
-    # Tensors are returned in the order they were given when creating the loader.
-    batch_img, batch_label, batch_weights = loader.dequeue()
-
-    if shuffle:
-        # Creates batches by randomly shuffling tensors / examples
-        batch_img, batch_label, batch_weights = \
-            tf.train.shuffle_batch([batch_img, batch_label, batch_weights], batch_size=batch_size,
-                                   enqueue_many=True,   # reader already fetches batches, therefore many are enqueued
-                                   capacity=batch_size*4, num_threads=1, min_after_dequeue=1)
-
-    return loader, reader, batch_img, batch_label, batch_weights
-
-
-def data_HDF5TableQueue(data_path, is_training=False, shuffle=False, batch_size=1):
-    '''
-    Adds a HDF5record data layer to your model graph.
-    This offers a pre-processing hook that can be used to transform data before feeding it to the network.
-
-    To use this in your model, make sure you add the following commands when running your session:
-        with tf.Session() as sess:
-            with loader.begin(sess):
-                for _ in range(N):
-                    sess.run(result)
-        reader.close()
-
-    :param data_path: path to data
-    :param is_training: (optional) by default False
-    :param batch_size: (optional) by default 1
-    :param shuffle: (optional) by default False
-    :return: a reader object that needs to be closed after running the session, the data
-    '''
-    logging.info("DataLayer HDF5Table Queue >> from %s" % (data_path))
-
-    reader = tftables.open_file(filename=data_path, batch_size=batch_size)
-
-    table_batch = reader.get_batch(
-        path='/data_table',
-        cyclic=True,
-        ordered=False
-    )
-
-    batch_img_r = table_batch['data']
-    # TODO only load label/weights data if not is_training
-    batch_label_r = table_batch['label']
-    batch_weights_r = table_batch['weights']
-
-    #################################
-    # PREPROCESS HOOK               #
-    # Any pre-processing here ...   #
-    #################################
-    # do some pre-processing since (my) data in HDF5 files is stored for caffe compatibility, not Tensorflow
-    # make sure all data has 4 dimensions (to fit the 4D-Tensor style [batch_size, x, y, channels])
-    [batch_img_r, batch_label_r, batch_weights_r], _ = unify_ndims([batch_img_r, batch_label_r, batch_weights_r], ndims=4)
-    # do some pre-processing since (my) data in HDF5 files is stored for caffe compatibility, not Tensorflow
-    batch_img_r, batch_label_r, batch_weights_r = _preproc_tf_HDF5Data(batch_img_r, batch_label_r, batch_weights_r)
-    logging.info("  | shapes: img %s | label %s | weights %s" %
-        (str(batch_img_r.shape), str(batch_label_r.shape), str(batch_weights_r.shape)))
-    # further pre-processing can be added here
-
-    # The loader takes a list of tensors to be stored in the queue (in ordered mode, threads should be 1).
-    loader = reader.get_fifoloader(
-        queue_size=10,
-        inputs=[batch_img_r, batch_label_r, batch_weights_r],
-        threads=1)
-
-    # Batches are taken out of the queue using a dequeue operation
-    # Tensors are returned in the order they were given when creating the loader.
-    batch_img, batch_label, batch_weights = loader.dequeue()
-
-    if shuffle:
-        # Creates batches by randomly shuffling tensors / examples
-        batch_img, batch_label, batch_weights = \
-            tf.train.shuffle_batch([batch_img, batch_label, batch_weights], batch_size=batch_size,
-                                   enqueue_many=True,   # reader already fetches batches, therefore many are enqueued
-                                   capacity=batch_size*4, num_threads=1, min_after_dequeue=1)
-
-    return loader, reader, batch_img, batch_label, batch_weights
-
-
 
 def data_HDF5(data_path,
               shape_img, shape_label, shape_weights,
@@ -312,11 +178,13 @@ def data_HDF5(data_path,
         logging.info("DataLayer HDF5 %s | prefetching %s samples with %s threads from %s " %
                      (("with augmentation" if augment else ''), str(prefetch_n), str(prefetch_threads), data_path))
 
-        sample_set = tf.data.Dataset.from_generator(
-            hdf5_generator(data_path,
+        data_gen = hdf5_generator(data_path,
                            augment=augment,
-                           repeat=True, cache_full_file=False,
-                           resample_n=resample_n),
+                           repeat=is_training, cache_full_file=True, shuffle=shuffle,
+                           resample_n=resample_n)
+
+        sample_set = tf.data.Dataset.from_generator(
+            data_gen,
             (tf.float32, tf.uint8, tf.float32),
             (tf.TensorShape(shape_img), tf.TensorShape(shape_label), tf.TensorShape(shape_weights))
         )
@@ -341,9 +209,10 @@ def data_HDF5(data_path,
 
         # repeat and shuffle: https://www.tensorflow.org/versions/master/performance/datasets_performance#repeat_and_shuffle
         # in Tensorflow r1.4 tensorflow.contrib.data.shuffle_and_repeat is not available
-        if shuffle:
-            sample_set = sample_set.shuffle(buffer_size=19)
-        sample_set = sample_set.repeat()
+        if shuffle and False: # this is deactivated and shuffling moved to data_gen
+            sample_set = sample_set.shuffle(buffer_size=data_gen.n_elements)
+        if is_training and False: # this is deactivated and repeating moved to data_gen to avoid OutOfRange Errors
+            sample_set = sample_set.repeat()
 
         # create batch
         sample_set = sample_set.batch(batch_size)
@@ -372,12 +241,19 @@ def data_HDF5(data_path,
 # HDF5 data generator contains logic on how to return samples from hdf5 files
 class hdf5_generator:
     def __init__(self, file, augment=False,
-                 repeat=False, cache_full_file=False,
+                 repeat=False, cache_full_file=False, shuffle=False,
                  resample_n=None):
         self.file = file
+        # allows to augment data already in the generator. can be slow
         self.augment = augment
+        # allows to repeat the dataset in the generator, making it "infinetly large"
         self.repeat = repeat
+        # allows to pre-shuffle data in the generator.
+        # This is just random access to the elements, it doesn't ensure that all elements are seen during one epoch.
+        self.shuffle = shuffle
+        # read the complete hdf5 file
         self.cache_full_file = cache_full_file
+        # repeat a single element
         self.resample_n = resample_n
         # can be adjusted in code:
         self.debug = False  # for timing measurements
@@ -390,11 +266,11 @@ class hdf5_generator:
             h5_keys = self.h5_keys  # for brevity in code
 
             # poke first dataset to get number of expected elements
-            n_elements = f[h5_keys[0]].shape[self.element_axis]
+            self.n_elements = f[h5_keys[0]].shape[self.element_axis]
             logging.info('HDF5 data_gen | Resample: [%s] / Caching: [%s] / Repeat: [%s] / | Reading %s elements (poked \'%s\' with %s) from %s' %
                          (str(self.resample_n), str(self.cache_full_file),
                           ('True (infinite data_gen makes dataset.repeat() obsolete)' if self.repeat else str(self.repeat)),
-                         str(n_elements), h5_keys[0], str(f[h5_keys[0]].shape), str(self.file)))
+                         str(self.n_elements), h5_keys[0], str(f[h5_keys[0]].shape), str(self.file)))
 
             if self.cache_full_file:
                 # read data and swap axes (channels needs to be last dim) -> [elements, x, y, channels]
@@ -407,7 +283,11 @@ class hdf5_generator:
                                          % ((end - start), str(self.cache_full_file)))
 
             while True: # repeat data generator infinitely if repeat==True, otherwise run at least once (do-while-loop)
-                for element_i in range(n_elements):
+                for element_i in range(self.n_elements):
+                    if self.shuffle:
+                        # choose a random element
+                        element_i = random.randrange(self.n_elements)
+
                     if self.resample_n is not None:
                         resample_i = 0 # init resample loop variable
                     while True: # resample if resample_n is given, otherwise run at least once (do-while-loop)
