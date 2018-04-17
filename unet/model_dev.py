@@ -15,11 +15,14 @@ import tensorflow as tf
 import tensorflow.contrib as tc
 from unet import data_layers
 from unet import unet_layers_dev as unet_layers
+from unet import uncertainty
+from util import filesys
 import logging
 import numpy as np
 from collections import deque
 import os
 import shutil
+import time
 
 # ##################################################################################
 # ##############                     UNET CLASS                         ############
@@ -36,7 +39,7 @@ class UNet():
                  data_layer_type='tfrecords',
                  batch_size=1, shuffle=False, augment=False,
                  prefetch_n=None, prefetch_threads=None,
-                 aleatoric_samples=None,
+                 aleatoric_samples=None, aleatoric_distr=None,
                  resample_n=None,
                  copy_script_dir=None, debug=False  # other stuff
                  ):
@@ -77,6 +80,7 @@ class UNet():
 
         self.aleatoric_samples = aleatoric_samples
 
+
         self.init_objects = []  # data layer may generate objects to be initialized
         self.close_objects = []  # ... or closed when creating a session
 
@@ -84,11 +88,12 @@ class UNet():
 
         # copy script to train_dir
         if copy_script_dir is not None:
-            shutil.copy(__file__, copy_script_dir + os.sep + os.path.basename(__file__))
+            copied = filesys.copy_file(__file__, copy_script_dir + os.sep + os.path.basename(__file__))
+            logging.info('Copied model py source to: ' + copied)
             # also copy affiliated sources (layers file)
             copy_layers_file = os.path.dirname(os.path.abspath(__file__)) + os.sep + "unet_layers_dev.py"
-            shutil.copy(copy_layers_file, copy_script_dir + os.sep + "unet_layers_dev.py")
-            logging.debug('Copied py source to: ' + copy_script_dir + os.sep + os.path.basename(__file__))
+            copied = filesys.copy_file(copy_layers_file, copy_script_dir + os.sep + os.path.basename(copy_layers_file))
+            logging.info('Copied layers py source to: ' + copied)
 
         logging.info('#-----------------------------------------------#')
         logging.info('#                 Creating Unet                 #')
@@ -142,7 +147,7 @@ class UNet():
         :return:
         '''
 
-        def resizer(image_batch, size=[256, 256]):
+        def resizer(image_batch, size=[128, 128]):
             return tf.image.resize_images(image_batch, size) if self.resize is None else image_batch
 
         with tf.variable_scope('Train_op'):
@@ -209,38 +214,8 @@ class UNet():
             # # --------------
             if self.aleatoric_samples is not None:
                 with tf.variable_scope('uncertainty'):
-                    label_one_hot = self.batch_label # [batch_size, x, y, classes]
-                    label_one_hot_negated = (label_one_hot - 1)*(-1) # [batch_size, x, y, classes]
-                    logits = self.output_mask  # [batch_size, x, y, classes]
-                    sigma = self.sigma  # [batch_size, x, y, classes] or [1, x, y, classes] or [1, x, y, 1]
-
-                    def sample_corrupt_logits(logits, sigma, sample_n):
-                        # this makes use of N(0,sigma**2) = N(0,1) * sigma
-                        # for easy computation of the corruption
-                        new_shape = [sample_n, tf.shape(logits)[0], tf.shape(logits)[1],
-                                     tf.shape(logits)[2], tf.shape(logits)[3]]
-                        # generating standard noise
-                        gaussian = tf.random_normal(new_shape, mean=0.0, stddev=1.0, dtype=logits.dtype)
-                        # "weighting" noise with sigma
-                        noise = tf.multiply(gaussian, sigma)
-                        # adding noise to logits
-                        return tf.add(logits, noise)
-
-                    # created [aleatoric_samples] of corrupted logits
-                    sampled_logits = sample_corrupt_logits(logits, sigma, self.aleatoric_samples) # [samples, batch_size, x, y, classes]
-
-                    # mask with one_hot_labels (but keep dims)
-                    logits_true_class = tf.multiply(sampled_logits, label_one_hot)
-                    logits_other_classes = tf.multiply(sampled_logits, label_one_hot_negated)
-
-                    # reduced since all other entries are 0 (because of one_hot_label_mask)
-                    true_class = tf.reduce_sum(logits_true_class, axis=-1, keep_dims=True)
-                    # sum over other classes
-                    sum1_other_classes = tf.log(tf.reduce_sum(tf.exp(logits_other_classes), axis=-1, keep_dims=True))
-                    # sum over and divide by number of samples
-                    sum2_samples = tf.reduce_mean(sum1_other_classes - true_class, axis=0)
-                    # sum over and divide by number of pixels
-                    loss_aletaoric = tf.reduce_mean(sum2_samples)
+                    loss_aletaoric, sampled_logits = uncertainty.aleatoric_loss(self.output_mask, self.batch_label,
+                                                                self.sigma, self.aleatoric_samples)
 
                     self.loss = loss_aletaoric
                     tf.summary.scalar('loss/optimize_loss', self.loss)
@@ -276,79 +251,30 @@ class UNet():
 
     # #########   TEST OPERATION     #########
     # ----------------------------------------
-    def create_test_op(self, session, img_summary=True):
+    def create_test_op(self):
         '''
-        Creates test op with loss and summaries.
+        Creates test op that returns data, labels and prediction tensors
+        as well as certain metrics
 
         :param learning_rate:
         :return:
         '''
-        with tf.variable_scope('test_op'):
-            self.global_step = tf.train.get_or_create_global_step()
 
-            if img_summary:  # takes a lot of space on disk when wrting images
-                with tf.variable_scope('img_summary'):
-                    tf.summary.image('img', tf.image.resize_images(self.batch_img[..., 0:3], [256, 256]))
-                    tf.summary.image('label',
-                                     tf.image.resize_images(tf.cast(self.batch_label, tf.float32), [256, 256]))
-                    tf.summary.image('weights', tf.image.resize_images(self.batch_weights, [256, 256]))
-                    tf.summary.image('prediction_c0', tf.image.resize_images(
-                        self.output_mask[..., 0, np.newaxis], [256, 256]))
-                    tf.summary.image('prediction_c1', tf.image.resize_images(
-                        self.output_mask[..., 1, np.newaxis], [256, 256]))
+        self.global_step = tf.train.get_or_create_global_step()
+        # prediction is (1, ?, ?), label (1, ?, ?, 1)
+        prediction_4D = tf.expand_dims(self.prediction, axis=-1)
 
-            # LOSS FUNCTIONS
-            # ------------------------
-            with tf.variable_scope('losses'):
-                self.batch_label_idx = tf.squeeze(self.batch_label, axis=-1)
-                # store label one-hot encoded (one channel per class)
-                # before tf.one_hot, tf.squeeze removes (empty) last dim, otherwise shape will be (batch_size, x, y, 1, n_classes):
-                self.batch_label = tf.one_hot(tf.squeeze(self.batch_label, axis=-1), self.n_class, axis=-1)
+        accuracy = tf.metrics.accuracy(self.batch_label, prediction_4D)
+        accuracy_per_class = tf.metrics.mean_per_class_accuracy(self.batch_label, prediction_4D, self.n_class)
+        mean_iou = tf.metrics.mean_iou(self.batch_label, prediction_4D, self.n_class)
+        precision = tf.metrics.precision(self.batch_label, prediction_4D)
+        recall = tf.metrics.recall(self.batch_label, prediction_4D)
 
-                # if img_summary:
-                #     with tf.variable_scope('img_summary'):
-                #         tf.summary.image('label_one_hot_c0', tf.image.resize_images(self.batch_label[..., 0, np.newaxis], [256, 256]))
-                #         tf.summary.image('label_one_hot_c1', tf.image.resize_images(self.batch_label[..., 1, np.newaxis], [256, 256]))
-
-                with tf.variable_scope('softmax_cross_entropy_with_logits'):
-                    # softmaxCE LOSS (cross entropy loss with softmax)
-                    loss_softmaxCE = tf.nn.softmax_cross_entropy_with_logits(labels=self.batch_label,
-                                                                             logits=self.output_mask)
-                    # above returns shape [batch_size, img.shape[1], img.shape[2]]
-                    # needs to be compatible with [batch_size, img.shape[1], img.shape[2] 1] for self.batch_weights
-                    loss_softmaxCE = tf.expand_dims(loss_softmaxCE, axis=-1)
-
-                    # weighted loss
-                    loss_softmaxCE_w = tf.multiply(loss_softmaxCE, self.batch_weights)
-
-                    if img_summary:
-                        with tf.variable_scope('img_summary'):
-                            softmax = tf.nn.softmax(logits=self.output_mask)
-                            tf.summary.image('softmax_c0',
-                                             tf.image.resize_images(softmax[..., 0, np.newaxis], [256, 256]))
-                            tf.summary.image('softmax_c1',
-                                             tf.image.resize_images(softmax[..., 1, np.newaxis], [256, 256]))
-                            max_softmax = tf.argmax(softmax, axis=-1)
-                            tf.summary.image('max_softmax',
-                                             tf.image.resize_images(max_softmax[..., np.newaxis], [256, 256]))
-                            tf.summary.image('softmax_CE', tf.image.resize_images(loss_softmaxCE, [256, 256]))
-                            tf.summary.image('softmax_CE_weighted',
-                                             tf.image.resize_images(loss_softmaxCE_w, [256, 256]))
-
-                    loss_softmaxCE_w = tf.reduce_mean(loss_softmaxCE_w)
-                    tf.summary.scalar('loss/weighted_softmax_cross_entropy', loss_softmaxCE_w)
-                    loss_softmaxCE = tf.reduce_mean(loss_softmaxCE)
-                    tf.summary.scalar('loss/softmax_cross_entropy', loss_softmaxCE)
-
-                # set loss used for optimization
-                self.loss = loss_softmaxCE_w
-                tf.summary.scalar('loss/optimize_loss', self.loss)
-                # ------------------------
-
-            # SUMMARY
-            self.merged_summary = tf.summary.merge_all()
-            return self.train_op, self.global_step, self.loss, self.merged_summary
-
+        return [self.batch_img, self.batch_label, self.batch_weights,
+                self.output_mask, self.prediction,
+                accuracy, precision, recall,
+                accuracy_per_class, mean_iou
+                ]
 
 
     # #########   DATA LAYER    #########

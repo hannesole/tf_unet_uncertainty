@@ -116,6 +116,12 @@ print('sampled_corrupted_logits ' + str(sampled_logits.shape))
 print(sess.run(sampled_logits))
 print('#' * 40)
 
+sampled_softmax_logits = tf.nn.softmax(sampled_logits, dim = 2)
+
+print('sampled_corrupted_softmax_logits ' + str(sampled_softmax_logits.shape))
+print(sess.run(sampled_softmax_logits))
+print('#' * 40)
+
 #print('logits_softmax ' + str(logits_softmax.shape))
 #logits_softmax = tf.nn.softmax(logits, dim=1 )
 #print(sess.run(logits_softmax))
@@ -124,7 +130,7 @@ print('#' * 40)
 #logits_maxed = tf.reduce_max(logits_soft, axis=1)
 #print(sess.run([logits_soft, logits_maxed]))
 
-logits = sampled_logits
+logits = sampled_softmax_logits
 print('#' * 20)
 
 #######################################
@@ -158,8 +164,6 @@ in_sum_t = logits_other_classes_rs - logits_true_class_rs
 
 print('in_sum_t ' + str(in_sum_t.shape))
 print(sess.run(in_sum_t))
-# print('logits_other_classes_rs ' + str(logits_other_classes_rs.shape))
-# print(sess.run(logits_other_classes_rs))
 print('#' * 40)
 
 #######################################
@@ -168,13 +172,60 @@ sum_t = tf.divide(tf.reduce_sum(in_sum_t, axis=0), T_samples)
 
 print('sum_t ' + str(sum_t.shape))
 print(sess.run(sum_t))
-# print('logits_other_classes_rs ' + str(logits_other_classes_rs.shape))
-# print(sess.run(logits_other_classes_rs))
 print('#' * 40)
 
+##############################################################################
+##############################################################################
+# ALTERNATIVE
+#
+# logits_c = tf.reduce_sum(logits_true_class, axis=2, keep_dims=True)
+# logits_diff = logits - logits_c
+#
+# print('logits_c ' + str(logits_c.shape))
+# print(sess.run(logits_c))
+# print('#' * 40)
+#
+# print('logits_diff ' + str(logits_diff.shape))
+# print(sess.run(logits_diff))
+# print('#' * 40)
+#
+# # exclude ones (exp(0) for true class - true class) by setting to zero before summing
+# logits_diff_exp = tf.multiply(tf.exp(logits_diff), (label_one_hot - 1) * (-1))
+#
+# print('logits_diff_exp ' + str(logits_diff_exp.shape))
+# print(sess.run(logits_diff_exp))
+# print('#' * 40)
+#
+# logits_sum1_class = tf.reduce_sum(logits_diff_exp, axis=2, keep_dims=True)
+#
+# print('logits_sum1_class ' + str(logits_sum1_class.shape))
+# print(sess.run(logits_sum1_class))
+# print('#' * 40)
+#
+# log_sum1 = tf.log(logits_sum1_class)
+#
+# print('log_sum1 ' + str(log_sum1.shape))
+# print(sess.run(log_sum1))
+# print('#' * 40)
+#
+# # sum over samples (with mean to normalize)
+# sum2 = tf.reduce_mean(log_sum1, axis=0)
+#
+# print('sum2 ' + str(sum2.shape))
+# print(sess.run(sum2))
+# print('#' * 40)
+#
+# # sum over pixels to form scalar (with mean to normalize)
+# loss = tf.reduce_mean(sum2)
+#
+# print('loss ' + str(loss.shape))
+# print(sess.run(loss))
+# print('#' * 40)
 
 
+#sum1 = tf.reduce_sum(logits_other_classes, axis=2, keep_dims=True)
 
+logits_other_classes_rs = tf.log(tf.reduce_sum(tf.exp(logits_other_classes), axis=2, keep_dims=True))
 
 
 
@@ -187,3 +238,44 @@ print('#' * 40)
 #                         'b1x0y1c0' 'b1x1y1c0']   'b1x0y1c1' 'b1x1y1c1']]
 #
 # labels[b, x, y, c]
+
+
+
+##############################################################################
+##############################################################################
+# FIRST VERSION IN MODEL TRAIN OP
+
+# # created [aleatoric_samples] of corrupted logits
+# sampled_logits = sample_corrupt_logits(logits, sigma, self.aleatoric_samples)  # [samples, batch_size, x, y, classes]
+#
+# # mask with one_hot_labels (but keep dims)
+# logits_true_class = tf.multiply(sampled_logits, label_one_hot)
+# logits_other_classes = tf.multiply(sampled_logits, label_one_hot_negated)
+#
+# # reduced since all other entries are 0 (because of one_hot_label_mask)
+# true_class = tf.reduce_sum(logits_true_class, axis=-1, keep_dims=True)
+# # sum over other classes
+# sum1_other_classes = tf.log(tf.reduce_sum(tf.exp(logits_other_classes), axis=-1, keep_dims=True))
+# # sum over and divide by number of samples
+# sum2_samples = tf.reduce_mean(sum1_other_classes - true_class, axis=0)
+# # sum over and divide by number of pixels
+# loss_aletaoric = tf.reduce_mean(sum2_samples)
+
+#
+# # created [aleatoric_samples] of corrupted logits
+# sampled_logits = sample_corrupt_logits(logits, sigma, self.aleatoric_samples)  # [samples, batch_size, x, y, classes]
+# # squash with softmax for numerical stability
+#
+# # reduced since all other entries are 0 (because of one_hot_label_mask)
+# true_class = tf.reduce_sum(logits_true_class, axis=-1, keep_dims=True)
+# # sum over other classes
+# sum1_other_classes = tf.log(tf.reduce_sum(tf.exp(logits_other_classes), axis=-1, keep_dims=True))
+# # sum over and divide by number of samples
+# sum2_samples = tf.reduce_mean(sum1_other_classes - true_class, axis=0)
+# # sum over and divide by number of pixels
+# loss_aletaoric = tf.reduce_mean(sum2_samples)
+# sampled_logits = tf.nn.softmax(sampled_logits, dim=2)
+#
+# # mask with one_hot_labels (but keep dims)
+# logits_true_class = tf.multiply(sampled_logits, label_one_hot)
+# logits_other_classes = tf.multiply(sampled_logits, label_one_hot_negated)

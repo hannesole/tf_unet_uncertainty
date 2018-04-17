@@ -9,11 +9,11 @@
 import logging
 import tensorflow as tf
 
-def initialize_uninitialized(sess):
+def initialize_uninitialized(sess, vars=None):
     " This checks global vars for uninitialized variables and initializes them. Adds ops to the graph! "
-    global_vars = tf.global_variables()
-    is_not_initialized = sess.run([tf.is_variable_initialized(var) for var in global_vars])
-    not_initialized_vars = [v for (v, f) in zip(global_vars, is_not_initialized) if not f]
+    init_vars = tf.global_variables() if vars is None else vars
+    is_not_initialized = sess.run([tf.is_variable_initialized(var) for var in init_vars])
+    not_initialized_vars = [v for (v, f) in zip(init_vars, is_not_initialized) if not f]
 
     logging.debug('> initialize_uninitialized. Found %s ' % str(len(not_initialized_vars)))
     if len(not_initialized_vars):

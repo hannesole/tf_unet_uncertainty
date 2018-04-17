@@ -62,7 +62,7 @@ args = argparse.ArgumentParser(description='UNet Training and Testing')
 # TRAINING & TESTING arguments
 args.add_argument('--dataset', '-d', metavar='dataset', required=False,
                     help='Path to the dataset that will be used for training/testing',
-                    default="/home/hornebeh/proj_tf_unet/data/tfrecord/1024x1024_rgbi/train.tfrecords")
+                    default="/home/hornebeh/proj_tf_unet/data/hdf5/trainset.h5")
 args.add_argument('--checkpoint', '-ckp', metavar='checkpoint', required=False,
                     help='Provide a model checkpoint file, otherwise searching for last one in train_dir/checkpoints.' +
                          'For training: Trains from scratch if no checkpoint is found.' +
@@ -120,26 +120,22 @@ def _________________________OPTIONS___________________________(): pass  # dummy
 # -> Override CLI arguments (for convenience when running from IDE)
 PROJECT_DIR = '/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/'
 
-
 # args.output_dir = '/home/hornebeh/proj_tf_unet/output/'
-args.name = 'unet_' + time.strftime("%Y-%m-%d_%H%M") + '_sh-aug-kp09-60k'
-# for new trainings:
-args.name = 'unet_' + time.strftime("%d_%H%M") + '_' + config_util.keystr_from_config(section='TRAIN')
+# args.output_dir = '/home/hornebeh/proj_tf_unet/output_scr/'
 
 # args.name = 'overwrite'
+# args.name = 'unet_' + time.strftime("%Y-%m-%d_%H%M") + '_sh-aug-kp09-60k'
+# generate name for new training
+args.name = 'unet_' + time.strftime("%d_%H%M") \
+            + '_' + config_util.keystr_from_config(section='TRAIN')
+
 # args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1409_debug_batch_norm'
-# args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1425_debug_no_batch_norm'
-#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1713_sh-aug-kp1-60k'
-#args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1717_sh-aug-kp09-60k'
-
 # args.train_dir = PROJECT_DIR + 'output_scr/' + 'unet_2018-03-25_2021_augment_saver'
-# args.train_dir = PROJECT_DIR + 'output_scr/' + 'unet_2018-03-28_1813_debug_no_droput'
 
-# args.checkpoint = PROJECT_DIR + 'output_scr/' + unet_2018-03-22_2021_augment/checkpoints/snapshot-34000"
 # args.checkpoint = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1425_debug_no_batch_norm/checkpoints/snapshot-4000'
+# args.checkpoint = PROJECT_DIR + 'output_scr/' + unet_2018-03-22_2021_augment/checkpoints/snapshot-34000"
 
-# args.dataset = PROJECT_DIR + "data/hdf5/std_data_v0_2_pdf/train/merged/train_dset_chunked.h5"
-args.dataset = PROJECT_DIR + "data/hdf5/testset.h5"
+args.dataset = PROJECT_DIR + "data/hdf5/trainset.h5"
 
 # ######################################################################################################################
 # SETUP VARS AND DIRS
@@ -150,9 +146,6 @@ logging.debug('os.uname: %s' % (str(os.uname())))  # log uname to check which no
 
 args.train_dir, args.continue_training = filesys.find_or_create_train_dir(
     args.name, args.output_dir, args.train_dir, args.continue_training)
-
-args.test_dir = filesys.find_or_create_test_dir(
-    args.test_dir, args.train_dir)
 
 args.code_copy_dir = filesys.find_or_create_code_copy_dir(
     __file__, args.code_copy_dir, args.train_dir)
@@ -168,11 +161,11 @@ class config_extended(config_util.config_decorator):
     """
 
     def __init__(self, config, default='DEFAULT'):
-        self.config = config
         self.config_prox = config['DEFAULT']
 
     debug = True if args.mode is None else ('debug' in args.mode)
     tfdbg = False if args.mode is None else ('tfdbg' in args.mode)
+    prep = False if args.mode is None else ('prep' in args.mode)
     # ---------> Training
     train = True if args.mode is None else ('train' in args.mode)  # script will train
     # ---------> Testing
@@ -423,10 +416,14 @@ if opts.train:
                      norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
                      resample_n=opts_train.resample_n,
                      is_training=True, keep_prob=opts_train.keep_prob,
-                     aleatoric_samples=opts_train.aleatoric_samples,
+                     aleatoric_samples=opts_train.aleatoric_samples, aleatoric_distr=opts_train.aleatoric_distr,
                      prefetch_n=opts_train.prefetch_n, prefetch_threads=opts_train.prefetch_threads,
                      debug=opts.debug, copy_script_dir=args.code_copy_dir
                      )
+
+    if opts.prep:
+        logging.info('#-X-------------- SETUP COMPLETE ---------------#')
+        sys.exit()
 
     with tf_debug.LocalCLIDebugWrapperSession(tf.Session(config=opts.tf_config)) if opts.tfdbg \
             else tf.Session(config=opts.tf_config) as sess:
@@ -469,8 +466,11 @@ def test_core(sess, net_test):
     logging.debug("predicting, sampling %s times, batch_size %s" % (opts_test.n_samples, opts_test.batch_size))
 
     for b in range(opts_test.n_samples):
-        batch_img, batch_label, batch_activations, batch_prediction = sess.run(
-            [net_test.batch_img, net_test.batch_label, net_test.output_mask, net_test.prediction])
+        try:
+            batch_img, batch_label, batch_activations, batch_prediction = sess.run(
+                [net_test.batch_img, net_test.batch_label, net_test.output_mask, net_test.prediction])
+        except tf.errors.OutOfRangeError:
+            break
 
         # out_img = np.squeeze(img_util.to_rgb(batch_activations))
         # img_util.save_image(out_img, "%s/img_%s_pred.png" % (args.test_dir, b))
@@ -493,8 +493,7 @@ def test_core(sess, net_test):
                                   np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis]))
                                   ), axis=1)
 
-        img_util.save_image(out_img, "%s/img_%s.png" % (args.predict_dir, b))
-
+        img_util.save_image(out_img, "%s/img_%s.png" % (args.test_dir, b))
 
         # ###########################################################################
         # CLOSE NET
@@ -516,25 +515,48 @@ def test_debug(sess, net_test):
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
 
-    # in case any variables are not yet initialized
-    # initialize_uninitialized(sess)
+    tf_helpers.initialize_uninitialized(sess)
+
+
+    # create test op and initialize associated variables
+    test_op = net_test.create_test_op()
+    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # ###########################################################################
     # RUN UNET
     # ###########################################################################
     logging.debug("predicting, sampling %s times, batch_size %s" % (opts_test.n_samples, opts_test.batch_size))
 
+    [c_accuracy, c_precision, c_recall,
+     c_accuracy_per_class, c_mean_iou] = [(0, 0), (0, 0), (0, 0), 0, 0]
+
     for b in range(opts_test.n_samples):
-        batch_img, batch_label, batch_activations, batch_prediction = sess.run(
-            [net_test.batch_img, net_test.batch_label, net_test.output_mask, net_test.prediction])
+        try:
+            test_op_results = sess.run(test_op)
+        except tf.errors.OutOfRangeError:
+            break
+
+        [batch_img, batch_label, batch_weights,
+         batch_activations, batch_prediction,
+         accuracy, precision, recall,
+         accuracy_per_class, mean_iou] = test_op_results
+
+        [c_accuracy, c_precision, c_recall, c_accuracy_per_class, c_mean_iou] = \
+            [[sum(x) for x in zip(accuracy,c_accuracy)],
+             [sum(x) for x in zip(precision, c_precision)],
+             [sum(x) for x in zip(recall, c_recall)],
+              c_accuracy_per_class + accuracy_per_class[0],
+              c_mean_iou + mean_iou[0]]
 
         # out_img = np.squeeze(img_util.to_rgb(batch_activations))
         # img_util.save_image(out_img, "%s/img_%s_pred.png" % (args.test_dir, b))
-
-        logging.debug('batch_activations: %s %s' % (str(batch_activations.shape), str(batch_activations.dtype)))
-        logging.debug('batch_prediction: %s %s' % (str(batch_prediction.shape), str(batch_prediction.dtype)))
-        logging.debug('batch_img: %s %s' % (str(batch_img.shape), str(batch_img.dtype)))
-        logging.debug('batch_label: %s %s' % (str(batch_label.shape), str(batch_label.dtype)))
+        logging.debug('\naccuracy: %s, prec: %s, rec: %s \naccuracy_per_class %s, \nmean_iou %s' %
+                      (str(accuracy), str(precision), str(recall),
+                       str(accuracy_per_class), str(mean_iou)))
+        #logging.debug('batch_activations: %s %s' % (str(batch_activations.shape), str(batch_activations.dtype)))
+        #logging.debug('batch_prediction: %s %s' % (str(batch_prediction.shape), str(batch_prediction.dtype)))
+        #logging.debug('batch_img: %s %s' % (str(batch_img.shape), str(batch_img.dtype)))
+        #logging.debug('batch_label: %s %s' % (str(batch_label.shape), str(batch_label.dtype)))
 
         # logging.debug('describe prediction_samples: ' + str(stats.describe(batch_activations)))
         # logging.debug('describe prediction_samples[0]: ' + str(stats.describe(prediction_samples[0])))
@@ -557,11 +579,20 @@ def test_debug(sess, net_test):
                                   np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis]))
                                   ), axis=1)
 
-        img_util.save_image(out_img, "%s/img_%s.png" % (args.predict_dir, b))
+        img_util.save_image(out_img, "%s/img_%s.png" % (args.test_dir, b))
 
         # ###########################################################################
         # CLOSE NET
         # ###########################################################################
+
+    c_accuracy = tuple(x / opts_test.n_samples for x in c_accuracy)
+    c_precision = tuple(x / opts_test.n_samples for x in c_precision)
+    c_recall = tuple(x / opts_test.n_samples for x in c_recall)
+    c_accuracy_per_class = c_accuracy_per_class / opts_test.n_samples
+    c_mean_iou = c_mean_iou / opts_test.n_samples
+    logging.debug('\naccuracy: %s, prec: %s, rec: %s \naccuracy_per_class %s, \nmean_iou %s' %
+                          (str(c_accuracy), str(c_precision), str(c_recall),
+                           str(c_accuracy_per_class), str(c_mean_iou)))
 
 
 # test with sampling for uncertainty (only makes sense when resample_n != None and keep_prob != 1.0
@@ -583,50 +614,52 @@ def test_sampling(sess, net_test):
     logging.debug("predicting, sampling %s x %s times, batch_size %s" %
                   (str(opts_test.n_samples), str(opts_test.resample_n), str(opts_test.batch_size)))
 
-    sample_dir = args.predict_dir + os.sep + 'samples'
+    sample_dir = args.test_dir + os.sep + 'samples'
     os.mkdir(sample_dir)
     for b in range(opts_test.n_samples):
+        try:
+            for s in range(opts_test.resample_n):
+                if s == 0:
+                    batch_img, batch_label, batch_pred = sess.run(
+                        [net_test.batch_img, net_test.batch_label, net_test.prediction])
+                    logging.debug('batch_img: %s %s' % (str(batch_img.shape), str(batch_img.dtype)))
+                    logging.debug('batch_label: %s %s' % (str(batch_label.shape), str(batch_label.dtype)))
+                    logging.debug('prediction: %s %s' % (str(batch_pred.shape), str(batch_pred.dtype)))
+                else:
+                    _, _, batch_pred = sess.run(
+                        [net_test.batch_img, net_test.batch_label, net_test.prediction])
+                    logging.debug('prediction: %s %s' % (
+                    str(prediction_samples[s, ...].shape), str(prediction_samples[s, ...].dtype)))
 
-        for s in range(opts_test.resample_n):
-            if s == 0:
-                batch_img, batch_label, batch_pred = sess.run(
-                    [net_test.batch_img, net_test.batch_label, net_test.prediction])
-                logging.debug('batch_img: %s %s' % (str(batch_img.shape), str(batch_img.dtype)))
-                logging.debug('batch_label: %s %s' % (str(batch_label.shape), str(batch_label.dtype)))
-                logging.debug('prediction: %s %s' % (str(batch_pred.shape), str(batch_pred.dtype)))
-            else:
-                _, _, batch_pred = sess.run(
-                    [net_test.batch_img, net_test.batch_label, net_test.prediction])
-                logging.debug('prediction: %s %s' % (
-                str(prediction_samples[s, ...].shape), str(prediction_samples[s, ...].dtype)))
+                r_batch_pred = np.reshape(batch_pred, [-1, batch_pred.shape[2]])
+                if s == 0: prediction_samples = np.zeros([opts_test.resample_n] + list(r_batch_pred.shape), dtype=np.uint8)
+                prediction_samples[s, ...] = r_batch_pred
 
-            r_batch_pred = np.reshape(batch_pred, [-1, batch_pred.shape[2]])
-            if s == 0: prediction_samples = np.zeros([opts_test.resample_n] + list(r_batch_pred.shape), dtype=np.uint8)
-            prediction_samples[s, ...] = r_batch_pred
+                out_sample = img_util.to_rgb(prediction_samples[s, ...])
+                img_util.save_image(out_sample, "%s/sample_%s_%s.png" % (sample_dir, b, s))
 
-            out_sample = img_util.to_rgb(prediction_samples[s, ...])
-            img_util.save_image(out_sample, "%s/sample_%s_%s.png" % (sample_dir, b, s))
+            logging.info('finished resampling (%s), calculating entropy' % (str(opts_test.resample_n)))
 
-        logging.info('finished resampling (%s), calculating entropy' % (str(opts_test.resample_n)))
+            entropy = calc.entropy_bin_array(prediction_samples)
+            mean = np.mean(prediction_samples, axis=0)
+            std = np.std(prediction_samples, axis=0)
 
-        entropy = calc.entropy_bin_array(prediction_samples)
-        mean = np.mean(prediction_samples, axis=0)
-        std = np.std(prediction_samples, axis=0)
+            r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
+            r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
 
-        r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
-        r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
+            out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
+                                      np.squeeze(img_util.to_rgb(r_batch_label)),
+                                      np.squeeze(
+                                          img_util.to_rgb(mean)),
+                                      np.squeeze(
+                                          img_util.to_rgb_heatmap(entropy, rgb_256=True)),
+                                      np.squeeze(
+                                          img_util.to_rgb_heatmap(std, rgb_256=True))
+                                      ), axis=1)
 
-        out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
-                                  np.squeeze(img_util.to_rgb(r_batch_label)),
-                                  np.squeeze(
-                                      img_util.to_rgb(mean)),
-                                  np.squeeze(
-                                      img_util.to_rgb_heatmap(entropy, rgb_256=True)),
-                                  np.squeeze(
-                                      img_util.to_rgb_heatmap(std, rgb_256=True))
-                                  ), axis=1)
-
-        img_util.save_image(out_img, "%s/img_%s.png" % (args.predict_dir, b))
+            img_util.save_image(out_img, "%s/img_%s.png" % (args.test_dir, b))
+        except tf.errors.OutOfRangeError:
+            break
 
         # ###########################################################################
         # CLOSE NET
@@ -635,8 +668,9 @@ def test_sampling(sess, net_test):
 
 def TEST(): pass
 
-
 if opts.test:
+    args.dataset = PROJECT_DIR + "data/hdf5/testset.h5"
+
     logging.info('####################################################################')
     logging.info('#                            TESTING                               #')
     logging.info('####################################################################')
@@ -655,6 +689,9 @@ if opts.test:
                      debug=opts.debug, copy_script_dir=None
                      )
 
+    args.test_dir = filesys.find_or_create_test_dir(
+        args.test_dir, args.train_dir)
+
     with tf_debug.LocalCLIDebugWrapperSession(tf.Session(config=opts.tf_config)) if opts.tfdbg \
             else tf.Session(config=opts.tf_config) as sess:
         # for hdf5 and feed_dict layers no coordinators need to be initialized
@@ -671,6 +708,10 @@ if opts.test:
     logging.info('#-X---------------------------------------------#')
     logging.info('#                Finish Testing                 #')
     logging.info('#-----------------------------------------------#')
+
+
+
+
 
 
 # ######################################################################################################################
@@ -709,7 +750,7 @@ def DEBUG_core(sess):
 
         print("stitching and creating file")
         out_img = np.concatenate([img_util.to_rgb(batch) for batch in r_batch_img], axis=1)
-        img_util.save_image(out_img, "%s/img_aug_%s.jpg" % (args.predict_dir, str(bb)))
+        img_util.save_image(out_img, "%s/img_aug_%s.jpg" % (args.test_dir, str(bb)))
 
     batch_img, batch_label, batch_weights = data_layers.data_HDF5(args.dataset,
                                                                   opts.shape_img, opts.shape_label, opts.shape_weights,
@@ -739,7 +780,7 @@ def DEBUG_core(sess):
                                   np.squeeze(img_util.to_rgb(r_batch_label)),
                                   np.squeeze(img_util.to_rgb(r_batch_weights, normalize=True))), axis=1)
 
-        img_util.save_image(out_img, "%s/img_%s.png" % (args.predict_dir, str(b)))
+        img_util.save_image(out_img, "%s/img_%s.png" % (args.test_dir, str(b)))
 
 
 # TODO: Remove debugging code

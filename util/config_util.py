@@ -127,17 +127,21 @@ class config_decorator:
         return OrderedDict(self.get_attr_val_list())
 
 
-def keystr_from_config(conf_file_path ='config_template.ini',
-                                 section = 'DEFAULT'):
+def keystr_from_config(conf_file_path ='config_template.ini', section = 'DEFAULT'):
+    # create config_reader (to allow config.attr access)
     config = configparser.ConfigParser()
     config.read(conf_file_path)
     opts = config_decorator(config[section])
 
-    build_string = ('bn_' if opts.norm_fn is not None else '') + \
+    # create string from config attributes
+    build_string = (('bn%1.3f_' % (opts.norm_fn_param_decay)).replace('0', '') if opts.norm_fn is not None else '') + \
+                   ('bs%i' % opts.batch_size if opts.batch_size > 1 else '') + \
                    ('s' if opts.shuffle else '') + \
                    ('A' if opts.augment else '') + \
-                   'Dp%1.1f' % (1 - opts.keep_prob) + \
-                   ('_Re%i' % opts.resample_n if opts.resample_n is not None else '') + \
-                   ('_AL%i' % opts.aleatoric_samples if opts.aleatoric_samples is not None else '')
+                   (('Dp%1.2f' % (1 - opts.keep_prob)) if opts.keep_prob < 1.0 else '') + \
+                   (('_Re%i' % opts.resample_n) if opts.resample_n is not None else '') + \
+                   (('_AL%i%s' % (opts.aleatoric_samples,
+                               opts.aleatoric_distr if opts.aleatoric_distr is not None else ''))
+                    if opts.aleatoric_samples is not None else '')
 
     return build_string.replace('.', '')
