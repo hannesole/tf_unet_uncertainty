@@ -17,6 +17,8 @@ from unet import data_layers
 from unet import unet_layers_dev as unet_layers
 from unet import uncertainty
 from util import filesys
+from util import img_util
+from util.tfutils import helpers as tfutil_helpers
 import logging
 import numpy as np
 from collections import deque
@@ -33,15 +35,11 @@ class UNet():
                  is_training=False, keep_prob=None,  # params for UNet architecture
                  n_contracting_blocks=5, n_start_features=8,
                  norm_fn=None, normalizer_params=None,
-                 shape_img=[1024, 1024, 3], shape_label=None, shape_weights=None, n_class=2,  # architecture/data
-                 resize=None, resize_method=None,
-                 dataset_pth=None,  # data layer ...
-                 data_layer_type='tfrecords',
-                 batch_size=1, shuffle=False, augment=False,
-                 prefetch_n=None, prefetch_threads=None,
                  aleatoric_samples=None, aleatoric_distr=None,
-                 resample_n=None,
-                 copy_script_dir=None, debug=False  # other stuff
+                 copy_script_dir=None, debug=False,  # other stuff
+                 opts_main=None, opts_val=None,  # for datalayer
+                 train_dir=None,
+                 sess=None # for val_fn
                  ):
         '''
         Creates the Unet Model with TFRecords data layer. Most params are optional and have default values.
@@ -63,24 +61,35 @@ class UNet():
         :param copy_script_dir: (optional) if provided, the model.py file is copied to this directory.
         :param debug: (optional) False by default. If True, image.summaries (large!) are added to the event log.
         '''
-        if shape_label is None: shape_label = [shape_img[0], shape_img[1], 1]
-        if shape_weights is None: shape_weights = [shape_img[0], shape_img[1], 1]
+        # if shape_label is None: shape_label = [shape_img[0], shape_img[1], 1]
+        # if shape_weights is None: shape_weights = [shape_img[0], shape_img[1], 1]
 
         # set keep_prob default during training, otherwise 1
         if keep_prob is None:
             self.keep_prob = 0.9 if is_training else 1.
         else:
             self.keep_prob = keep_prob  # Giving a param overrides this default
+
         self.is_training = is_training
-        self.n_class = n_class
-
-        self.resize = resize
-        self.shuffle = shuffle
-        self.batch_size = batch_size
-
         self.aleatoric_samples = aleatoric_samples
 
+        self.train_dir = train_dir
+        self.sess = sess
 
+        # for datalayers
+        self.opts_main = opts_main
+        self.opts_val = opts_val
+        if opts_val is not None:
+            self.val_dir = filesys.find_or_create_val_dir(train_dir=self.train_dir, val_dir=opts_val.val_dir)
+            self._setup_val()
+
+        # for train_op
+        self.n_class = opts_main.n_class
+        self.resize = opts_main.resize
+        # self.shuffle = shuffle
+        # self.batch_size = batch_size
+
+        #TODO safe to remove when TFRecords layer is deleted
         self.init_objects = []  # data layer may generate objects to be initialized
         self.close_objects = []  # ... or closed when creating a session
 
@@ -100,16 +109,48 @@ class UNet():
         logging.info('#-----------------------------------------------#')
 
         ## DATA LAYER
-        self.batch_img, self.batch_label, self.batch_weights = \
-            self._build_data_layer(dataset_pth,  # data specific settings
-                                   shape_img=shape_img, shape_label=shape_label, shape_weights=shape_weights,
-                                   resize = resize, resize_method=resize_method,
-                                   data_layer_type=data_layer_type,
-                                   batch_size=batch_size, shuffle = shuffle, augment=augment,
-                                   is_training=is_training,  # params for UNet architecture
-                                   prefetch_n=prefetch_n, prefetch_threads=prefetch_threads,
-                                   resample_n=resample_n
-                                   )
+        def f_data_train():
+            """ function to create datalayer for training """
+            batch_img, batch_label, batch_weights = \
+                self._build_data_layer(opts_main.dataset,
+                                       shape_img=opts_main.shape_img, shape_label=opts_main.shape_label,
+                                       shape_weights=opts_main.shape_weights,
+                                       resize=opts_main.resize, resize_method=opts_main.resize_method,
+                                       data_layer_type=opts_main.data_layer_type,
+                                       batch_size=opts_main.batch_size,
+                                       shuffle=opts_main.shuffle, augment=opts_main.augment,
+                                       prefetch_n=opts_main.prefetch_n, prefetch_threads=opts_main.prefetch_threads,
+                                       resample_n=opts_main.resample_n,
+                                       is_training=is_training
+                                       )
+            return (batch_img, batch_label, batch_weights)
+
+        def f_data_val():
+            """ function to create datalayer for validation """
+            batch_img, batch_label, batch_weights = \
+                self._build_data_layer(opts_val.dataset,
+                                       shape_img=opts_val.shape_img, shape_label=opts_val.shape_label,
+                                       shape_weights=opts_val.shape_weights,
+                                       resize=opts_val.resize, resize_method=opts_val.resize_method,
+                                       data_layer_type=opts_val.data_layer_type,
+                                       batch_size=opts_val.batch_size,
+                                       shuffle=opts_val.shuffle, augment=opts_val.augment,
+                                       prefetch_n=opts_val.prefetch_n, prefetch_threads=opts_val.prefetch_threads,
+                                       resample_n=opts_val.resample_n,
+                                       is_training=is_training
+                                       )
+            return (batch_img, batch_label, batch_weights)
+
+        if opts_val is None:
+            # if validation options are not defined, use training set by default
+            self.batch_img, self.batch_label, self.batch_weights = f_data_train()
+        else:
+            # if validation options are defined, create two data layers and feedable switch 'use_train_data'
+            self.use_train_data = tf.placeholder_with_default(tf.constant(True, dtype=bool), [], name="is_training")
+            self.batch_img, self.batch_label, self.batch_weights = \
+                tf.cond(self.use_train_data, f_data_train, f_data_val, name='DataLayers')
+
+
         ## NETWORK
         self.output_mask, self.sigma, self.prediction \
             = self._build_net(self.batch_img, n_class=self.n_class,
@@ -118,7 +159,7 @@ class UNet():
                               aleatoric_samples = aleatoric_samples,
                               norm_fn=norm_fn, normalizer_params=normalizer_params
                               )
-        logging.info('Created UNet with Input size %s and Output Tensor %s' % (str(shape_img), str(self.output_mask)))
+        # logging.info('Created UNet with Input size %s and Output Tensor %s' % (str(shape_img), str(self.output_mask)))
 
         ## OUTPUT TEST
         #if not is_training:
@@ -153,6 +194,13 @@ class UNet():
         with tf.variable_scope('Train_op'):
             self.global_step = tf.train.get_or_create_global_step()
 
+            # # METRICS
+            # # ------------------------
+            # with tf.variable_scope('metrics'):
+            #     # prediction_4D = tf.expand_dims(self.prediction, axis=-1)
+            #     accuracy, _ = tf.metrics.accuracy(self.batch_label, self.prediction)
+            #     tf.summary.scalar('accuracy', accuracy)
+
             if img_summary:  # takes a lot of space
                 with tf.variable_scope('img_summary'):
                     tf.summary.image('0_img', resizer(self.batch_img[..., 0:3]))
@@ -175,16 +223,16 @@ class UNet():
                 self.batch_label_idx = tf.squeeze(self.batch_label, axis=-1)
                 # store label one-hot encoded (one channel per class)
                 # before tf.one_hot, tf.squeeze removes (empty) last dim, otherwise shape will be (batch_size, x, y, 1, n_classes):
-                self.batch_label = tf.one_hot(tf.squeeze(self.batch_label, axis=-1), self.n_class, axis=-1)
+                self.batch_label_oh = tf.one_hot(tf.squeeze(self.batch_label, axis=-1), self.n_class, axis=-1)
 
                 # if img_summary:
                 #     with tf.variable_scope('img_summary'):
-                #         tf.summary.image('label_one_hot_c0', tf.image.resize_images(self.batch_label[..., 0, np.newaxis], [256, 256]))
-                #         tf.summary.image('label_one_hot_c1', tf.image.resize_images(self.batch_label[..., 1, np.newaxis], [256, 256]))
+                #         tf.summary.image('label_one_hot_c0', tf.image.resize_images(self.batch_label_oh[..., 0, np.newaxis], [256, 256]))
+                #         tf.summary.image('label_one_hot_c1', tf.image.resize_images(self.batch_label_oh[..., 1, np.newaxis], [256, 256]))
 
                 with tf.variable_scope('softmax_cross_entropy_with_logits'):
                     # softmaxCE LOSS (cross entropy loss with softmax)
-                    loss_softmaxCE = tf.nn.softmax_cross_entropy_with_logits(labels=self.batch_label,
+                    loss_softmaxCE = tf.nn.softmax_cross_entropy_with_logits(labels=self.batch_label_oh,
                                                                              logits=self.output_mask)
                     # above returns shape [batch_size, img.shape[1], img.shape[2]]
                     # needs to be compatible with [batch_size, img.shape[1], img.shape[2] 1] for self.batch_weights
@@ -214,7 +262,7 @@ class UNet():
             # # --------------
             if self.aleatoric_samples is not None:
                 with tf.variable_scope('uncertainty'):
-                    loss_aletaoric, sampled_logits = uncertainty.aleatoric_loss(self.output_mask, self.batch_label,
+                    loss_aletaoric, sampled_logits = uncertainty.aleatoric_loss(self.output_mask, self.batch_label_oh,
                                                                 self.sigma, self.aleatoric_samples)
 
                     self.loss = loss_aletaoric
@@ -227,7 +275,6 @@ class UNet():
                         averaged_sampled_logits = tf.reduce_mean(sampled_logits, axis=0)
                         tf.summary.image('0_corrupt_prediction_c0', resizer(averaged_sampled_logits[..., 0, np.newaxis]))
                         tf.summary.image('0_corrupt_prediction_c1', resizer(averaged_sampled_logits[..., 1, np.newaxis]))
-
 
             # LEARNING RATE
             with tf.variable_scope('learning_rate'):
@@ -251,9 +298,9 @@ class UNet():
 
     # #########   TEST OPERATION     #########
     # ----------------------------------------
-    def create_test_op(self):
+    def metrics(self):
         '''
-        Creates test op that returns data, labels and prediction tensors
+        Creates test op that returns data, label and prediction batch tensors
         as well as certain metrics
 
         :param learning_rate:
@@ -270,11 +317,109 @@ class UNet():
         precision = tf.metrics.precision(self.batch_label, prediction_4D)
         recall = tf.metrics.recall(self.batch_label, prediction_4D)
 
+        return  accuracy, precision, recall, accuracy_per_class, mean_iou
+
+    # #########   TEST OPERATION     #########
+    # ----------------------------------------
+    def test_op(self):
+        '''
+        Creates test op that returns data, label and prediction batch tensors
+        as well as certain metrics
+
+        :param learning_rate:
+        :return:
+        '''
+
+        self.global_step = tf.train.get_or_create_global_step()
+        # prediction is (1, ?, ?), label (1, ?, ?, 1)
+        prediction_4D = tf.expand_dims(self.prediction, axis=-1)
+
+        accuracy = tf.metrics.accuracy(self.batch_label, prediction_4D)
+        accuracy_per_class = tf.metrics.mean_per_class_accuracy(self.batch_label, prediction_4D, self.n_class)
+        mean_iou = tf.metrics.mean_iou(self.batch_label, prediction_4D, self.n_class)
+        precision = tf.metrics.precision(self.batch_label, prediction_4D)
+        recall = tf.metrics.recall(self.batch_label, prediction_4D)
+
+        softmax = tf.nn.softmax(logits=self.output_mask)
+
         return [self.batch_img, self.batch_label, self.batch_weights,
-                self.output_mask, self.prediction,
+                self.output_mask, softmax, self.prediction,
                 accuracy, precision, recall,
                 accuracy_per_class, mean_iou
                 ]
+
+
+    def _setup_val(self):
+        train_logdir = os.path.join(self.train_dir, 'trainlogs/val')
+        self.val_summary_writer = tf.summary.FileWriter(train_logdir, graph=tf.get_default_graph())
+
+
+    def val_minimal_fn(self):
+        """ does only one single forward pass """
+        sess = self.sess
+        global_step_value = self.sess.run(self.global_step)
+
+        # only add summary for loss
+        val_summary,_,_,_ = sess.run([self.merged_summary, self.batch_img, self.batch_label, self.output_mask],
+                               feed_dict={self.use_train_data: False} )
+
+        self.val_summary_writer.add_summary(val_summary, global_step_value)
+        self.val_summary_writer.flush()
+
+        pass
+
+
+    def val_sample_fn(self):
+        """ does opts_val.n_samples forward passes and writes images """
+        opts_val = self.opts_val
+        val_dir = self.val_dir
+        sess = self.sess
+
+        logging.info('#----------------------------#')
+        logging.info('#    Sampling over Valset    #')
+        logging.info("# %s samples, to %s" % (opts_val.n_samples, val_dir))
+
+        global_step_value = self.sess.run(self.global_step)
+        # self.val_summary_writer.add_session_log(tf.SessionLog(status=tf.SessionLog.START), global_step=global_step_value)
+
+        for b in range(opts_val.n_samples):
+            try:
+                batch_img, batch_label, batch_activations, batch_prediction, \
+                val_summary = \
+                    sess.run(
+                    [self.batch_img, self.batch_label, self.output_mask, self.prediction,
+                     self.merged_summary],
+                    feed_dict = {self.use_train_data : False}
+                )
+            except tf.errors.OutOfRangeError:
+                break
+
+            # add summaries
+            self.val_summary_writer.add_summary(val_summary, global_step_value)
+            self.val_summary_writer.flush()
+
+            r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
+            r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
+            r_batch_activations = np.reshape(batch_activations,
+                                             [-1, batch_activations.shape[2], batch_activations.shape[3]])
+            r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+
+            out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
+                                      np.squeeze(img_util.to_rgb(r_batch_label)),
+                                      np.squeeze(
+                                          img_util.to_rgb(r_batch_activations[..., 0, np.newaxis], normalize=True)),
+                                      np.squeeze(
+                                          img_util.to_rgb(r_batch_activations[..., 1, np.newaxis], normalize=True)),
+                                      np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis]))
+                                      ), axis=1)
+
+            img_util.save_image(out_img, "%s/img_%s.png" % (val_dir, b))
+
+        logging.info('#                            #')
+        logging.info('#-X--------------------------#')
+
+        pass
+
 
 
     # #########   DATA LAYER    #########

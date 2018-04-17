@@ -519,7 +519,7 @@ def test_debug(sess, net_test):
 
 
     # create test op and initialize associated variables
-    test_op = net_test.create_test_op()
+    test_op = net_test.test_op()
     tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # ###########################################################################

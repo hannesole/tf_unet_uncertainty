@@ -103,6 +103,17 @@ class config_decorator:
         #     return None
         # ... would allow referencing options that are neither defined in config.ini nor the class
         # by returning None for those.
+
+        # debug compatibility with older versions:
+        # if attr == 'dset_train':
+        #     return '/home/hornebeh/proj_tf_unet/data/hdf5/trainset.h5'
+        # elif attr == 'n_class':
+        #     return 2
+        # elif attr == 'prefetch_threads':
+        #     return 12
+        # elif attr == 'prefetch_n':
+        #     return 32
+
         return parse_implicitly_extended(self.config_prox, attr)
 
     def get_attr_list(self):

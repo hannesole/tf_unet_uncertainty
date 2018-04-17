@@ -41,11 +41,13 @@ def find_or_create_train_dir(name, output_dir, train_dir, continue_training=Fals
             return train_dir, continue_training
 
 
-def find_or_create_test_dir(test_dir, train_dir):
+def find_or_create_test_dir(test_dir, train_dir, global_step=None):
     # create test_dir if it doesn't exist. Use either default naming or a given parameter.
     if test_dir is None:
         # create test_dir with current time if none is specified
-        test_dir = train_dir + os.sep + "prediction" + '_' + time.strftime("%Y-%m-%d_%H%M")
+        test_dir = train_dir + os.sep + "prediction" + \
+                   ('' if global_step is None else ('_%s' % str(global_step))) + \
+                   time.strftime("_%Y-%m-%d_%H%M")
         # avoid overwriting (by appendin _X to name if already exists)
         if os.path.exists(test_dir):
             test_dir = test_dir + '_'
@@ -64,6 +66,14 @@ def find_or_create_test_dir(test_dir, train_dir):
         else:
             logging.info('Using existing test_dir %s ' % test_dir)
         return test_dir
+
+
+def find_or_create_val_dir(train_dir, val_dir=None):
+    if val_dir is None:
+        val_dir = train_dir + os.sep + "validation"
+    if not os.path.exists(val_dir):
+        os.mkdir(val_dir)  # create later
+    return val_dir
 
 
 def find_or_create_code_copy_dir(file_src, code_copy_dir, train_dir):

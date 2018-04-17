@@ -60,9 +60,6 @@ logs.initConsoleLogger()
 
 args = argparse.ArgumentParser(description='UNet Training and Testing')
 # TRAINING & TESTING arguments
-args.add_argument('--dataset', '-d', metavar='dataset', required=False,
-                    help='Path to the dataset that will be used for training/testing',
-                    default="/home/hornebeh/proj_tf_unet/data/hdf5/trainset.h5")
 args.add_argument('--checkpoint', '-ckp', metavar='checkpoint', required=False,
                     help='Provide a model checkpoint file, otherwise searching for last one in train_dir/checkpoints.' +
                          'For training: Trains from scratch if no checkpoint is found.' +
@@ -98,7 +95,7 @@ args.add_argument('--train_dir', '-t', metavar='train_dir', required=False,
 
 # TESTING ARGUMENTS
 args.add_argument('--continue_training', '-c', metavar='continue_training', required=False,
-                    help='If not None, will continue training from latest checkpoint. ' +
+                    help='If True, will continue training from latest checkpoint. ' +
                          'Otherwise train_dir is recreated.',
                     default=False)
 
@@ -109,7 +106,6 @@ args.add_argument('--test_dir', '-p', metavar='test_dir', required=False,
                     default=None)
 
 args = args.parse_args()
-
 
 # ######################################################################################################################
 # SCRIPT ARGS / OVERRIDE ARGS
@@ -135,8 +131,6 @@ args.name = 'unet_' + time.strftime("%d_%H%M") \
 # args.checkpoint = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1425_debug_no_batch_norm/checkpoints/snapshot-4000'
 # args.checkpoint = PROJECT_DIR + 'output_scr/' + unet_2018-03-22_2021_augment/checkpoints/snapshot-34000"
 
-args.dataset = PROJECT_DIR + "data/hdf5/trainset.h5"
-
 # ######################################################################################################################
 # SETUP VARS AND DIRS
 # -------------------
@@ -149,7 +143,6 @@ args.train_dir, args.continue_training = filesys.find_or_create_train_dir(
 
 args.code_copy_dir = filesys.find_or_create_code_copy_dir(
     __file__, args.code_copy_dir, args.train_dir)
-
 
 # ######################################################################################################################
 
@@ -189,6 +182,8 @@ config.read(filesys.find_or_create_config_path(args.train_dir))
 opts = config_extended(config, default='DEFAULT')
 opts_test = config_util.config_decorator(config['TEST'])
 opts_train = config_util.config_decorator(config['TRAIN'])
+try: opts_val = config_util.config_decorator(config['VAL'])
+except KeyError: opts_val = None
 
 # output opts to console
 print(config_util.opts_to_str(opts))
@@ -223,7 +218,8 @@ def train_core(sess, net):
                             img_summary=True)
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
-    tf_helpers.initialize_uninitialized(sess)
+    tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
+    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # setup saver list
     saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
@@ -238,7 +234,8 @@ def train_core(sess, net):
         display_interval=1,
         runstats_interval=100,
         trace_interval=100,
-        summary_int_ops=[(1, merged_summary)]
+        summary_int_ops=[(1, merged_summary)],
+        test_int_fn=[(1, net.val_minimal_fn)]
     )
 
 
@@ -405,28 +402,26 @@ if opts.train:
     logging.info('####################################################################')
     logging.info('#                            TRAINING                              #')
     logging.info('####################################################################')
-
-    # create network graph with data layer
-    net = model.UNet(dataset_pth=args.dataset,
-                     shape_img=opts_train.shape_img, shape_label=opts_train.shape_label, shape_weights=opts_train.shape_weights,
-                     batch_size=opts_train.batch_size, shuffle=opts_train.shuffle, augment=opts_train.augment,
-                     resize=opts_train.resize, resize_method=opts_train.resize_method,
-                     data_layer_type=opts_train.data_layer_type,
-                     n_contracting_blocks=opts_train.n_contracting_blocks, n_start_features=opts_train.n_start_features,
-                     norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
-                     resample_n=opts_train.resample_n,
-                     is_training=True, keep_prob=opts_train.keep_prob,
-                     aleatoric_samples=opts_train.aleatoric_samples, aleatoric_distr=opts_train.aleatoric_distr,
-                     prefetch_n=opts_train.prefetch_n, prefetch_threads=opts_train.prefetch_threads,
-                     debug=opts.debug, copy_script_dir=args.code_copy_dir
-                     )
-
-    if opts.prep:
-        logging.info('#-X-------------- SETUP COMPLETE ---------------#')
-        sys.exit()
-
+    # create session (tfdbg works only in command line)
     with tf_debug.LocalCLIDebugWrapperSession(tf.Session(config=opts.tf_config)) if opts.tfdbg \
             else tf.Session(config=opts.tf_config) as sess:
+
+        # create network graph with data layer
+        net = model.UNet(is_training=True, keep_prob=opts_train.keep_prob,
+                         n_contracting_blocks=opts.n_contracting_blocks,
+                         n_start_features=opts.n_start_features,
+                         norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
+                         aleatoric_samples=opts.aleatoric_samples, aleatoric_distr=opts.aleatoric_distr,
+                         copy_script_dir=args.code_copy_dir, debug=opts.debug,
+                         opts_main=opts_train, opts_val=opts_val,
+                         sess=sess, train_dir=args.train_dir
+                         )
+
+
+        if opts.prep:
+            logging.info('#-X-------------- SETUP COMPLETE ---------------#')
+            sys.exit()
+
         if not opts.debug:
             train_core(sess, net)
         else:
@@ -515,11 +510,11 @@ def test_debug(sess, net_test):
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
 
-    tf_helpers.initialize_uninitialized(sess)
 
 
     # create test op and initialize associated variables
-    test_op = net_test.create_test_op()
+    test_op = net_test.test_op()
+    tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
     tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # ###########################################################################
@@ -530,6 +525,9 @@ def test_debug(sess, net_test):
     [c_accuracy, c_precision, c_recall,
      c_accuracy_per_class, c_mean_iou] = [(0, 0), (0, 0), (0, 0), 0, 0]
 
+    [global_step] = sess.run([net_test.global_step])
+    args.test_dir = filesys.find_or_create_test_dir(args.test_dir, args.train_dir, global_step=global_step)
+
     for b in range(opts_test.n_samples):
         try:
             test_op_results = sess.run(test_op)
@@ -537,7 +535,7 @@ def test_debug(sess, net_test):
             break
 
         [batch_img, batch_label, batch_weights,
-         batch_activations, batch_prediction,
+         batch_activations, batch_softmax, batch_prediction,
          accuracy, precision, recall,
          accuracy_per_class, mean_iou] = test_op_results
 
@@ -550,9 +548,9 @@ def test_debug(sess, net_test):
 
         # out_img = np.squeeze(img_util.to_rgb(batch_activations))
         # img_util.save_image(out_img, "%s/img_%s_pred.png" % (args.test_dir, b))
-        logging.debug('\naccuracy: %s, prec: %s, rec: %s \naccuracy_per_class %s, \nmean_iou %s' %
-                      (str(accuracy), str(precision), str(recall),
-                       str(accuracy_per_class), str(mean_iou)))
+        # logging.debug('\naccuracy: %s, prec: %s, rec: %s \naccuracy_per_class %s, \nmean_iou %s' %
+        #               (str(accuracy), str(precision), str(recall),
+        #                str(accuracy_per_class), str(mean_iou)))
         #logging.debug('batch_activations: %s %s' % (str(batch_activations.shape), str(batch_activations.dtype)))
         #logging.debug('batch_prediction: %s %s' % (str(batch_prediction.shape), str(batch_prediction.dtype)))
         #logging.debug('batch_img: %s %s' % (str(batch_img.shape), str(batch_img.dtype)))
@@ -669,31 +667,24 @@ def test_sampling(sess, net_test):
 def TEST(): pass
 
 if opts.test:
-    args.dataset = PROJECT_DIR + "data/hdf5/testset.h5"
-
     logging.info('####################################################################')
     logging.info('#                            TESTING                               #')
     logging.info('####################################################################')
 
-    # create network graph with data layer
-    net = model.UNet(dataset_pth=args.dataset,
-                     shape_img=opts_test.shape_img, shape_label=opts_test.shape_label, shape_weights=opts_test.shape_weights,
-                     batch_size=opts_test.batch_size, shuffle=False, augment=False,
-                     resize=opts_test.resize, resize_method=opts_test.resize_method,
-                     data_layer_type=opts_test.data_layer_type,
-                     n_contracting_blocks=opts_test.n_contracting_blocks, n_start_features=opts_test.n_start_features,
-                     norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
-                     resample_n=opts_test.resample_n,
-                     is_training=False, keep_prob=opts_test.keep_prob,
-                     prefetch_n=None, prefetch_threads=None,
-                     debug=opts.debug, copy_script_dir=None
-                     )
 
-    args.test_dir = filesys.find_or_create_test_dir(
-        args.test_dir, args.train_dir)
 
     with tf_debug.LocalCLIDebugWrapperSession(tf.Session(config=opts.tf_config)) if opts.tfdbg \
             else tf.Session(config=opts.tf_config) as sess:
+
+        # create network graph with data layer
+        net = model.UNet(is_training=False, keep_prob=opts_test.keep_prob,
+                         n_contracting_blocks=opts.n_contracting_blocks,
+                         n_start_features=opts.n_start_features,
+                         norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
+                         copy_script_dir=args.code_copy_dir, debug=opts.debug,
+                         opts_main=opts_test,
+                         sess=sess, train_dir=args.train_dir)
+
         # for hdf5 and feed_dict layers no coordinators need to be initialized
         # different when using tfrecords
         if opts.debug:
@@ -730,7 +721,7 @@ def DEBUG_core(sess):
     logging.info('#                Start Debugging                #')
     logging.info('#-----------------------------------------------#')
 
-    batch_img, batch_label, batch_weights = data_layers.data_HDF5(args.dataset,
+    batch_img, batch_label, batch_weights = data_layers.data_HDF5(opts.dset_train,
                                                                   opts.shape_img, opts.shape_label, opts.shape_weights,
                                                                   shuffle=False, batch_size=opts.batch_size,
                                                                   prefetch_threads=12, prefetch_n=40,
@@ -752,7 +743,7 @@ def DEBUG_core(sess):
         out_img = np.concatenate([img_util.to_rgb(batch) for batch in r_batch_img], axis=1)
         img_util.save_image(out_img, "%s/img_aug_%s.jpg" % (args.test_dir, str(bb)))
 
-    batch_img, batch_label, batch_weights = data_layers.data_HDF5(args.dataset,
+    batch_img, batch_label, batch_weights = data_layers.data_HDF5(opts.dset_train,
                                                                   opts.shape_img, opts.shape_label, opts.shape_weights,
                                                                   shuffle=True, batch_size=opts.batch_size,
                                                                   prefetch_threads=12, prefetch_n=10,
