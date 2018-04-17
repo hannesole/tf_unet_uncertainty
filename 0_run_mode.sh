@@ -1,8 +1,8 @@
 #!/bin/bash
 #PBS -N std_py
 #PBS -S /bin/bash
-#PBS -l nodes=1:nvidiaTITANX:ppn=16,gpus=1,walltime=23:59:59
-#PBS -q student
+#PBS -l nodes=1:ppn=16,mem=8gb,gpus=1:nvidiaTITANX,walltime=23:59:59
+#PBS -q default-gpu
 #PBS -m abe
 #PBS -M hh128@jupiter.uni-freiburg.de
 #PBS -j oe
