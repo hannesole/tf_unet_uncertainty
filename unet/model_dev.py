@@ -79,9 +79,6 @@ class UNet():
         # for datalayers
         self.opts_main = opts_main
         self.opts_val = opts_val
-        if opts_val is not None:
-            self.val_dir = filesys.find_or_create_val_dir(train_dir=self.train_dir, val_dir=opts_val.val_dir)
-            self._setup_val()
 
         # for train_op
         self.n_class = opts_main.n_class
@@ -121,7 +118,8 @@ class UNet():
                                        shuffle=opts_main.shuffle, augment=opts_main.augment,
                                        prefetch_n=opts_main.prefetch_n, prefetch_threads=opts_main.prefetch_threads,
                                        resample_n=opts_main.resample_n,
-                                       is_training=is_training
+                                       is_training=is_training,
+                                       name = 'train' if is_training else 'test'
                                        )
             return (batch_img, batch_label, batch_weights)
 
@@ -137,7 +135,8 @@ class UNet():
                                        shuffle=opts_val.shuffle, augment=opts_val.augment,
                                        prefetch_n=opts_val.prefetch_n, prefetch_threads=opts_val.prefetch_threads,
                                        resample_n=opts_val.resample_n,
-                                       is_training=is_training
+                                       is_training=is_training,
+                                       name = 'val'
                                        )
             return (batch_img, batch_label, batch_weights)
 
@@ -262,11 +261,19 @@ class UNet():
             # # --------------
             if self.aleatoric_samples is not None:
                 with tf.variable_scope('uncertainty'):
-                    loss_aletaoric, sampled_logits = uncertainty.aleatoric_loss(self.output_mask, self.batch_label_oh,
-                                                                self.sigma, self.aleatoric_samples)
+                    loss_aletaoric, sampled_logits = \
+                        uncertainty.aleatoric_loss(self.output_mask, self.batch_label_oh,
+                                                   self.sigma, self.aleatoric_samples)
 
                     self.loss = loss_aletaoric
-                    tf.summary.scalar('loss/optimize_loss', self.loss)
+                    tf.summary.scalar('loss/aleatoric_loss', self.loss)
+
+                    sigma_min = tf.reduce_min(self.sigma)
+                    tf.summary.scalar('stats/sigma_min', sigma_min)
+                    sigma_max = tf.reduce_max(self.sigma)
+                    tf.summary.scalar('stats/sigma_max', sigma_max)
+                    sigma_avg = tf.reduce_mean(self.sigma)
+                    tf.summary.scalar('stats/sigma_avg', sigma_avg)
 
                 if img_summary:  # takes a lot of space
                     with tf.variable_scope('img_summary_uncertainty'):
@@ -275,6 +282,14 @@ class UNet():
                         averaged_sampled_logits = tf.reduce_mean(sampled_logits, axis=0)
                         tf.summary.image('0_corrupt_prediction_c0', resizer(averaged_sampled_logits[..., 0, np.newaxis]))
                         tf.summary.image('0_corrupt_prediction_c1', resizer(averaged_sampled_logits[..., 1, np.newaxis]))
+
+            with tf.variable_scope('stats'):
+                activation_min = tf.reduce_min(self.output_mask)
+                tf.summary.scalar('activation_min', activation_min)
+                activation_max = tf.reduce_max(self.output_mask)
+                tf.summary.scalar('activation_max', activation_max)
+                activation_avg = tf.reduce_mean(self.output_mask)
+                tf.summary.scalar('activation_avg', activation_avg)
 
             # LEARNING RATE
             with tf.variable_scope('learning_rate'):
@@ -349,9 +364,32 @@ class UNet():
                 ]
 
 
-    def _setup_val(self):
-        train_logdir = os.path.join(self.train_dir, 'trainlogs/val')
-        self.val_summary_writer = tf.summary.FileWriter(train_logdir, graph=tf.get_default_graph())
+    def setup_val_ops(self):
+        """ Needs to be run if net is supposed to do validation during training. """
+        if self.opts_val is None:
+            return []
+        else:
+            # setup a summary writer if one or both val ops are req
+            if (self.opts_val.val_intervall is not None and self.opts_val.val_intervall > 0) or \
+                    ((self.opts_val.val_intervall_sample is not None and self.opts_val.val_intervall_sample > 0) and\
+                    (self.opts_val.n_samples is not None and self.opts_val.n_samples > 0)):
+                train_logdir = os.path.join(self.train_dir, 'trainlogs/val')
+                self.val_summary_writer = tf.summary.FileWriter(train_logdir, graph=tf.get_default_graph())
+
+            val_ops = []
+            # basic val_op (one sample, merged training summary)
+            if self.opts_val.val_intervall is not None and self.opts_val.val_intervall > 0:
+                val_ops.append( (self.opts_val.val_intervall, self.val_minimal_fn) )
+            # val_sample_fn allows to sample multiple times, write out images. add custom code here best.
+            if (self.opts_val.val_intervall_sample is not None and self.opts_val.val_intervall_sample > 0) and\
+                    (self.opts_val.n_samples is not None and self.opts_val.n_samples > 0):
+                val_ops.append( (self.opts_val.val_intervall_sample, self.val_sample_fn) )
+                # create
+                if self.opts_val.val_dir is not None:
+                    self.val_dir = filesys.find_or_create_val_dir(train_dir=self.train_dir,
+                                                                  val_dir=self.opts_val.val_dir)
+            logging.info('Setup validation ops: ' + str(val_ops))
+            return val_ops
 
 
     def val_minimal_fn(self):
@@ -359,13 +397,12 @@ class UNet():
         sess = self.sess
         global_step_value = self.sess.run(self.global_step)
 
-        # only add summary for loss
+        # only add summary for loss (run session with feed_dict to switch datalayer)
         val_summary,_,_,_ = sess.run([self.merged_summary, self.batch_img, self.batch_label, self.output_mask],
                                feed_dict={self.use_train_data: False} )
 
         self.val_summary_writer.add_summary(val_summary, global_step_value)
         self.val_summary_writer.flush()
-
         pass
 
 
@@ -375,49 +412,52 @@ class UNet():
         val_dir = self.val_dir
         sess = self.sess
 
-        logging.info('#----------------------------#')
-        logging.info('#    Sampling over Valset    #')
-        logging.info("# %s samples, to %s" % (opts_val.n_samples, val_dir))
+        if opts_val is not None and opts_val.val_sample_intervall is not None:
+            logging.info('#----------------------------#')
+            logging.info('#    Sampling over Valset    #')
+            logging.info("# %s samples, to %s" % (opts_val.n_samples, val_dir))
 
-        global_step_value = self.sess.run(self.global_step)
-        # self.val_summary_writer.add_session_log(tf.SessionLog(status=tf.SessionLog.START), global_step=global_step_value)
+            global_step_value = self.sess.run(self.global_step)
+            # not needed:
+            # self.val_summary_writer.add_session_log(tf.SessionLog(status=tf.SessionLog.START), global_step=global_step_value)
 
-        for b in range(opts_val.n_samples):
-            try:
-                batch_img, batch_label, batch_activations, batch_prediction, \
-                val_summary = \
-                    sess.run(
-                    [self.batch_img, self.batch_label, self.output_mask, self.prediction,
-                     self.merged_summary],
-                    feed_dict = {self.use_train_data : False}
-                )
-            except tf.errors.OutOfRangeError:
-                break
+            for b in range(opts_val.n_samples):
+                try:
+                    # run session with feed_dict to switch datalayer
+                    batch_img, batch_label, batch_activations, batch_prediction, \
+                    val_summary = \
+                        sess.run(
+                        [self.batch_img, self.batch_label, self.output_mask, self.prediction,
+                         self.merged_summary],
+                        feed_dict = {self.use_train_data : False}
+                    )
+                except tf.errors.OutOfRangeError:
+                    break
 
-            # add summaries
-            self.val_summary_writer.add_summary(val_summary, global_step_value)
-            self.val_summary_writer.flush()
+                # add summaries
+                self.val_summary_writer.add_summary(val_summary, global_step_value)
+                self.val_summary_writer.flush()
 
-            r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
-            r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
-            r_batch_activations = np.reshape(batch_activations,
-                                             [-1, batch_activations.shape[2], batch_activations.shape[3]])
-            r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+                if val_dir is not None:
+                    r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
+                    r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
+                    r_batch_activations = np.reshape(batch_activations,
+                                                     [-1, batch_activations.shape[2], batch_activations.shape[3]])
+                    r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
 
-            out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
-                                      np.squeeze(img_util.to_rgb(r_batch_label)),
-                                      np.squeeze(
-                                          img_util.to_rgb(r_batch_activations[..., 0, np.newaxis], normalize=True)),
-                                      np.squeeze(
-                                          img_util.to_rgb(r_batch_activations[..., 1, np.newaxis], normalize=True)),
-                                      np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis]))
-                                      ), axis=1)
+                    out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
+                                              np.squeeze(img_util.to_rgb(r_batch_label)),
+                                              np.squeeze(
+                                                  img_util.to_rgb(r_batch_activations[..., 0, np.newaxis], normalize=True)),
+                                              np.squeeze(
+                                                  img_util.to_rgb(r_batch_activations[..., 1, np.newaxis], normalize=True)),
+                                              np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis]))
+                                              ), axis=1)
 
-            img_util.save_image(out_img, "%s/img_%s.png" % (val_dir, b))
+                    img_util.save_image(out_img, "%s/img_%s.png" % (val_dir, b))
 
-        logging.info('#                            #')
-        logging.info('#-X--------------------------#')
-
+            logging.info('#                            #')
+            logging.info('#-X--------------------------#')
         pass
 
 
@@ -431,7 +471,8 @@ class UNet():
                           data_layer_type='feed_dict',
                           batch_size=1, shuffle=False, augment=False,
                           prefetch_n=None, prefetch_threads=None, # ...
-                          resample_n=None, valset_path=None  # other features
+                          resample_n=None, # other features
+                          name = None
                           ):
         '''
         Builds a data layer and adds it to the graph. The type of the data layer is determined by data_layer_type.
@@ -467,7 +508,7 @@ class UNet():
                                           is_training=is_training,
                                           batch_size=batch_size, shuffle=shuffle, augment=augment,
                                           prefetch_n=prefetch_n, prefetch_threads=prefetch_threads,
-                                          resample_n=resample_n)
+                                          resample_n=resample_n, name=name)
             elif data_layer_type == 'hdf5_dset':
                 #TODO: basically deprecated, use dataset API instead (hdf5)
                 hdf5loader, hdf5reader, self.batch_img, self.batch_label, self.batch_weights = \

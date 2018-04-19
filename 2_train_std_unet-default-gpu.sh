@@ -1,7 +1,7 @@
 #!/bin/bash
 #PBS -N std_py
 #PBS -S /bin/bash
-#PBS -l nodes=1:ppn=1:gpus=1:nvidiaTITANX,walltime=24:00:00,mem=12gb
+#PBS -l hostlist=^chip+chap+dicky+donatello+ducky+frieda+michelangelo+summi+track+trixi+william,nodes=1:ppn=1,mem=8gb,gpus=1:nvidiaTITANX,walltime=23:59:59
 #PBS -q default-gpu
 #PBS -m abe
 #PBS -M hh128@jupiter.uni-freiburg.de
@@ -12,10 +12,7 @@
 # usage in commandline: bashscript.sh mode
 export SCRIPT_NAME=std_unet.py
 export MODE=train
-export NAME=${name}
 export OUT_DIR="/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/output_scr"
-export TRAIN_DIR=$OUT_DIR'/'$NAME
-echo $MODE $TRAIN_DIR
 
 #source /misc/software/cuda/add_environment_cuda9.0.176_cudnnv7.sh      # used for Tensorflow >= 1.5.0
 source /misc/software/cuda/add_environment_cuda8.0.61_cudnnv6.sh        # used for Tensorflow < 1.5.0
@@ -30,4 +27,4 @@ cd /misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet
 # set python interpreter to virtual_evnironment
 #. /misc/lmbraid19/hornebeh/std/py_env/tf_unet/bin/activate
 source /misc/lmbraid19/hornebeh/std/py_env/tf_unet/bin/activate
-python $SCRIPT_NAME -t $TRAIN_DIR -m $MODE 2>&1| tee $OUT_DIR/qlog-$NAME-`date +%F_%R`.log
+python $SCRIPT_NAME -o $OUT_DIR -m $MODE 2>&1| tee $OUT_DIR/qlog-$MODE-`date +%F_%R`.log

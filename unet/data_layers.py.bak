@@ -225,6 +225,8 @@ def data_HDF5(data_path,
 
         # create iterator
         [batch_img, batch_label, batch_weights] = sample_set.make_one_shot_iterator().get_next()
+        logging.info("  | shapes: img %s | label %s | weights %s" %
+                     (str(batch_img.shape), str(batch_label.shape), str(batch_weights.shape)))
 
         # set shapes (dataset.batch() doesn't include batch_size information for shapes)
         batch_img.shape.dims[0] = tf.Dimension(batch_size)
@@ -270,7 +272,6 @@ class hdf5_generator:
         self.h5_keys = keys
         self.augment = augment
         self.repeat = repeat
-        if not repeat and cache_full_file: self.repeat = True
         self.shuffle = shuffle
         self.cache_full_file = cache_full_file
         self.resample_n = resample_n

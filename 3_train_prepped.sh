@@ -30,4 +30,4 @@ cd /misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet
 # set python interpreter to virtual_evnironment
 #. /misc/lmbraid19/hornebeh/std/py_env/tf_unet/bin/activate
 source /misc/lmbraid19/hornebeh/std/py_env/tf_unet/bin/activate
-python $SCRIPT_NAME -t $TRAIN_DIR -m $MODE 2>&1| tee $OUT_DIR/qlog-`date +%F_%R`.log
+python $SCRIPT_NAME -t $TRAIN_DIR -m $MODE 2>&1| tee $OUT_DIR/qlog-$NAME-`date +%F_%R`.log

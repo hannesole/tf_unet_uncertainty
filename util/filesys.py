@@ -42,7 +42,8 @@ def find_or_create_train_dir(name, output_dir, train_dir, continue_training=Fals
 
 
 def find_or_create_test_dir(test_dir, train_dir, global_step=None):
-    # create test_dir if it doesn't exist. Use either default naming or a given parameter.
+    # create test_dir if it doesn't exist. Use either default naming (optionally adding global_step)
+    # or a given test_dir.
     if test_dir is None:
         # create test_dir with current time if none is specified
         test_dir = train_dir + os.sep + "prediction" + \
@@ -69,6 +70,7 @@ def find_or_create_test_dir(test_dir, train_dir, global_step=None):
 
 
 def find_or_create_val_dir(train_dir, val_dir=None):
+    """ Creates a directory that validation images can be sampled to. """
     if val_dir is None:
         val_dir = train_dir + os.sep + "validation"
     if not os.path.exists(val_dir):
@@ -77,6 +79,7 @@ def find_or_create_val_dir(train_dir, val_dir=None):
 
 
 def find_or_create_code_copy_dir(file_src, code_copy_dir, train_dir):
+    """ If not None, creates a directory that code can be copied to. """
     if code_copy_dir is not None:
         if code_copy_dir == 'train_dir':
             # copy script to train_dir
@@ -93,8 +96,19 @@ def find_or_create_code_copy_dir(file_src, code_copy_dir, train_dir):
         return None
 
 
-def find_or_create_config_path(base_dir, config_name = 'config.ini', config_template = 'config_template.ini'):
-    """ This checks first for a config.ini in base_dir. If none is found, config_template is copied. """
+def find_or_create_config_path(base_dir, config_name = 'config.ini', config_template = 'config.ini'):
+    """
+        This checks first for a config.ini in base_dir.
+        If none is found, config.ini is copied to base_dir.
+        config_name can be specified to use a specific config file-name.
+
+    :param base_dir: Directory in which config.ini should be and will be copied to if not found.
+    Usually train dir (or test dir if testing with specific config).
+    :param config_name: config file-name (default config.ini)
+    :param config_template: config template that is used as backup if config isn't found
+    (default: config.ini at script location)
+    :return:
+    """
     config_path = base_dir + os.sep + config_name
 
     if os.path.exists(config_path):

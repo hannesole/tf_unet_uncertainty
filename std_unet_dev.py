@@ -60,19 +60,22 @@ logs.initConsoleLogger()
 
 args = argparse.ArgumentParser(description='UNet Training and Testing')
 # TRAINING & TESTING arguments
-args.add_argument('--checkpoint', '-ckp', metavar='checkpoint', required=False,
-                    help='Provide a model checkpoint file, otherwise searching for last one in train_dir/checkpoints.' +
-                         'For training: Trains from scratch if no checkpoint is found.' +
-                         'For testing: Breaks if no checkpoint is found (model cannot initialize).',
-                    default=None)
 args.add_argument('--mode', '-m', metavar='mode', required=False,
                     help="CL parameter to activate phases ['train' or 'test'] " +
                          "or modes ['tfdbg': TensorFlow CLI debugger, 'debug': Additonal debug code]. " +
                          "To activate multiple phases, just concatenate strings in arbitrary order, " +
                          "e.g. ('traintest' or 'testtrain' or 'debugtrain').",
                     default=None)
+args.add_argument('--config', '-c', metavar='config', required=False,
+                    help="The location of the config file. Default is config.ini in script directory.",
+                    default='config.ini')
+args.add_argument('--checkpoint', '-ckp', metavar='checkpoint', required=False,
+                    help='Provide a model checkpoint file, otherwise searching for last one in train_dir/checkpoints.' +
+                         'For training: Trains from scratch if no checkpoint is found.' +
+                         'For testing: Breaks if no checkpoint is found (model cannot initialize).',
+                    default=None)
 args.add_argument('--code_copy_dir', '-cc', metavar='code_copy_dir', required=False,
-                    help='If specified, script and model will be copied to this dir. Default: train_dir.',
+                    help='If specified, script and model .py will be copied to this dir. Default: train_dir.',
                     default='train_dir')
 
 #   for output of training / input of testing:
@@ -93,10 +96,10 @@ args.add_argument('--train_dir', '-t', metavar='train_dir', required=False,
                          '(this overrides output_dir and name).',
                     default=None)
 
-# TESTING ARGUMENTS
-args.add_argument('--continue_training', '-c', metavar='continue_training', required=False,
+# TRAINING ARGUMENTS
+args.add_argument('--continue_training', '-ct', metavar='continue_training', required=False,
                     help='If True, will continue training from latest checkpoint. ' +
-                         'Otherwise train_dir is recreated.',
+                         'Otherwise train_dir is recreated (avoids overwriting by appending _N).',
                     default=False)
 
 # TESTING ARGUMENTS
@@ -121,15 +124,19 @@ PROJECT_DIR = '/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_un
 
 # args.name = 'overwrite'
 # args.name = 'unet_' + time.strftime("%Y-%m-%d_%H%M") + '_sh-aug-kp09-60k'
-# generate name for new training
+# generate name for new training by reading config
 args.name = 'unet_' + time.strftime("%d_%H%M") \
-            + '_' + config_util.keystr_from_config(section='TRAIN')
+            + '_' + config_util.keystr_from_config(args.config, section='TRAIN')
 
 # args.train_dir = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1409_debug_batch_norm'
 # args.train_dir = PROJECT_DIR + 'output_scr/' + 'unet_2018-03-25_2021_augment_saver'
 
 # args.checkpoint = PROJECT_DIR + 'output/' + 'unet_2018-04-05_1425_debug_no_batch_norm/checkpoints/snapshot-4000'
 # args.checkpoint = PROJECT_DIR + 'output_scr/' + unet_2018-03-22_2021_augment/checkpoints/snapshot-34000"
+
+logging.info('#====================================================================#')
+logging.info('#' + ' '*((70-2-len(args.name))//2) + args.name + ' '*((70-1-len(args.name))//2) + '#')
+logging.info('#====================================================================#')
 
 # ######################################################################################################################
 # SETUP VARS AND DIRS
@@ -146,7 +153,6 @@ args.code_copy_dir = filesys.find_or_create_code_copy_dir(
 
 # ######################################################################################################################
 
-
 class config_extended(config_util.config_decorator):
     """
     Wrapper class for control flow options and default config options.
@@ -154,15 +160,17 @@ class config_extended(config_util.config_decorator):
     """
 
     def __init__(self, config, default='DEFAULT'):
-        self.config_prox = config['DEFAULT']
+        self.config_prox = config[default]
 
     debug = True if args.mode is None else ('debug' in args.mode)
     tfdbg = False if args.mode is None else ('tfdbg' in args.mode)
     prep = False if args.mode is None else ('prep' in args.mode)
     # ---------> Training
     train = True if args.mode is None else ('train' in args.mode)  # script will train
+    if (train): train_dir = args.train_dir
     # ---------> Testing
     test = True if args.mode is None else ('test' in args.mode)  # script will do testing
+    if (test): test_dir = args.test_dir
 
     tf_config = tf.ConfigProto(log_device_placement=False)
     if 'dacky' in os.uname()[1]:
@@ -187,7 +195,6 @@ except KeyError: opts_val = None
 
 # output opts to console
 print(config_util.opts_to_str(opts))
-
 
 opts_test.norm_fn
 
@@ -219,11 +226,15 @@ def train_core(sess, net):
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
     tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
-    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
+    # initializing local variables might be needed for some metrics
+    # tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # setup saver list
     saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
     saver_list.append(global_step)  # for easy output: import pprint; pprint.pprint(saver_list)
+
+    # create and setup validation ops
+    val_ops = net.setup_val_ops()
 
     trainer.mainloop(
         max_iter=opts_train.max_iter,
@@ -235,7 +246,7 @@ def train_core(sess, net):
         runstats_interval=100,
         trace_interval=100,
         summary_int_ops=[(1, merged_summary)],
-        test_int_fn=[(1, net.val_minimal_fn)]
+        test_int_fn=val_ops
     )
 
 
@@ -283,6 +294,9 @@ def train_debug(sess, net):
     saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
     saver_list.append(global_step)  # for easy output: import pprint; pprint.pprint(saver_list)
 
+    # create and setup validation ops
+    val_ops = net.setup_val_ops()
+
     trainer.mainloop(
         max_iter=opts_train.max_iter,
         saver_interval=opts_train.saver_interval,
@@ -292,7 +306,8 @@ def train_debug(sess, net):
         display_interval=1,
         runstats_interval=100,
         trace_interval=100,
-        summary_int_ops=[(1, merged_summary)]
+        summary_int_ops=[(1, merged_summary)],
+        test_int_fn=val_ops
     )
 
     # TODO Debug saving method
@@ -498,6 +513,74 @@ def test_core(sess, net_test):
 def test_debug(sess, net_test):
     logging.info('#-----------------------------------------------#')
     logging.info('#               Starting Testing (debug)        #')
+    logging.info('#-----------------------------------------------#')
+
+    # load model for testing (if None provided, searches in train_dir, if not found doesn't load)
+    trainer = SimpleTrainer(session=sess, train_dir=args.train_dir)
+    chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
+    # init variables if no checkpoint was loaded
+    if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
+    logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
+
+    # ###########################################################################
+    # RUN UNET
+    # ###########################################################################
+    logging.debug("predicting, sampling %s times, batch_size %s" % (opts_test.n_samples, opts_test.batch_size))
+
+    for b in range(opts_test.n_samples):
+        net_batch_softmax = tf.nn.softmax(net_test.output_mask)
+        try:
+            logging.debug("run ...")
+            batch_img, batch_label, batch_softmax, batch_prediction = sess.run(
+                [net_test.batch_img, net_test.batch_label, net_batch_softmax, net_test.prediction])
+        except tf.errors.OutOfRangeError:
+            break
+        logging.debug("... success")
+
+        # out_img = np.squeeze(img_util.to_rgb(batch_activations))
+        # img_util.save_image(out_img, "%s/img_%s_pred.png" % (args.test_dir, b))
+
+        r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
+        r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
+        r_batch_softmax = np.reshape(batch_softmax,
+                                         [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
+        r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+
+        import scipy.io
+        # matlab arrays
+        scipy.io.savemat("%s/tile_%s.mat" % (args.test_dir, b), mdict={
+            'tile' : r_batch_img,
+            'label' : r_batch_label,
+            'pred' : r_batch_prediction,
+            'softmax' : r_batch_softmax
+        } )
+
+
+        logging.debug('writing tile-file: %s/tile_%s.mat' % (args.test_dir, b))
+        logging.debug('  softmax_activations: %s %s' % (str(r_batch_softmax.shape), str(r_batch_softmax.dtype)))
+        logging.debug('  prediction: %s %s' % (str(r_batch_prediction.shape), str(r_batch_prediction.dtype)))
+        logging.debug('  img: %s %s' % (str(r_batch_img.shape), str(r_batch_img.dtype)))
+        logging.debug('  label: %s %s' % (str(r_batch_label.shape), str(r_batch_label.dtype)))
+
+        # summary
+        out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
+                                  np.squeeze(img_util.to_rgb(r_batch_label)),
+                                  np.squeeze(img_util.to_rgb(r_batch_softmax[..., 0, np.newaxis], normalize=True)),
+                                  np.squeeze(img_util.to_rgb(r_batch_softmax[..., 1, np.newaxis], normalize=True)),
+                                  np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis]))
+                                  ), axis=1)
+
+        img_util.save_image(out_img, "%s/tile_%s_summary.png" % (args.test_dir, b))
+
+        # ###########################################################################
+        # CLOSE NET
+        # ###########################################################################
+
+
+
+def test_metrics(sess, net_test):
+    logging.info('#-----------------------------------------------#')
+    logging.info('#               Starting Testing (metrics)      #')
     logging.info('#-----------------------------------------------#')
 
     # load model for testing (if None provided, searches in train_dir, if not found doesn't load)

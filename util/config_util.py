@@ -138,7 +138,7 @@ class config_decorator:
         return OrderedDict(self.get_attr_val_list())
 
 
-def keystr_from_config(conf_file_path ='config_template.ini', section = 'DEFAULT'):
+def keystr_from_config(conf_file_path = 'config.ini', section = 'DEFAULT'):
     # create config_reader (to allow config.attr access)
     config = configparser.ConfigParser()
     config.read(conf_file_path)
@@ -151,8 +151,10 @@ def keystr_from_config(conf_file_path ='config_template.ini', section = 'DEFAULT
                    ('A' if opts.augment else '') + \
                    (('Dp%1.2f' % (1 - opts.keep_prob)) if opts.keep_prob < 1.0 else '') + \
                    (('_Re%i' % opts.resample_n) if opts.resample_n is not None else '') + \
-                   (('_AL%i%s' % (opts.aleatoric_samples,
-                               opts.aleatoric_distr if opts.aleatoric_distr is not None else ''))
-                    if opts.aleatoric_samples is not None else '')
+                   (('_AL%i%s%s' % (opts.aleatoric_samples,
+                                     opts.aleatoric_distr if opts.aleatoric_distr is not None else '',
+                                    ('_'+opts.aleatoric_reg) if opts.aleatoric_reg is not None else '' ))
+                    if opts.aleatoric_samples is not None else '') + \
+                   (('_%s' % opts.train_name) if opts.train_name is not None else '')
 
     return build_string.replace('.', '')

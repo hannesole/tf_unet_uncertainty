@@ -21,18 +21,17 @@ else:
     os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 sess = tf.Session(config=tf_config)
-
 tf.set_random_seed(1)
 
-#logits = tf.constant([[.1, .2, .7],
-                      # [.3, .4, .3]])
-# label_one_hot = tf.constant([[0, 0, 1],
-#                              [0, 1, 0]])
-
-# for better console visualization, class_axis = 1
-#logits = tf.random_uniform((1, 3, 4, 4), seed=2)
-
+# how many aleatoric samples
 T_samples = 2
+# dim for n_classes
+axis_c = 1
+
+##############################################################################
+# SETUP
+##############################################################################
+
 
 sigma = tf.constant(
         [[[[0.040639675,0.08575996,0.05539584,0.08587229],
@@ -49,7 +48,10 @@ sigma = tf.constant(
             [0.079628694,0.08301997,0.037294245,0.061025727],
             [0.03026377,0.08446696,0.08468499,0.01163864],
             [0.06305574,0.09808638,0.08773422,0.05724373,]]]])
-
+# sigma = tf.multiply(sigma, 0)
+print('sigma ' + str(sigma.shape))
+print(sess.run(sigma))
+print('#' * 40)
 
 label_one_hot = tf.constant(
     [[ [[0, 0, 0, 0],
@@ -66,11 +68,18 @@ label_one_hot = tf.constant(
         [1, 1, 1, 0],
         [1, 0, 0, 0],
         [0, 0, 0, 0]] ]], dtype=tf.float32)
-
 print('label one hot ' + str(label_one_hot.shape))
 print(sess.run(label_one_hot))
 print('#' * 40)
 
+label_one_hot_neg = (label_one_hot - 1)*(-1)
+
+
+def sample_corrupt_logits(logits, sigma, sample_n):
+    new_shape = [sample_n, tf.shape(logits)[0],tf.shape(logits)[1], tf.shape(logits)[2], tf.shape(logits)[3]]
+    gaussian = tf.random_normal(new_shape, mean=0.0, stddev=1.0, dtype=logits.dtype, seed=1)
+    noise = tf.multiply(gaussian, sigma)  #
+    return tf.add(logits, noise)
 
 logits = tf.constant(
     [[[[0.05554414,0.01869845,0.07080972,0.27141213],
@@ -87,92 +96,177 @@ logits = tf.constant(
         [0.20151675,0.78892636,0.653041,0.44452262],
         [0.13248003,0.3896109,0.902364,0.3857646,],
         [0.31667006,0.16516733,0.43019414,0.12097478]]]])
-
 print('logits ' + str(logits.shape))
 print(sess.run(logits))
-print('#' * 40)
 
-def corrupt_logits(logits, sigma):
-    gaussian = tf.random_normal(tf.shape(logits), mean=0.0, stddev=1.0, dtype=logits.dtype)
-    noise = tf.multiply(gaussian, sigma)  #
-    return tf.add(logits, noise)
+print('#' * 60)
 
-def sample_corrupt_logits(logits, sigma, sample_n):
-    new_shape = [sample_n, tf.shape(logits)[0],tf.shape(logits)[1], tf.shape(logits)[2], tf.shape(logits)[3]]
-    gaussian = tf.random_normal(new_shape, mean=0.0, stddev=1.0, dtype=logits.dtype)
-    noise = tf.multiply(gaussian, sigma)  #
-    return tf.add(logits, noise)
+# ##############################################################################
+# # SOFTMAX CROSS ENTROPY DEMYSTIFIED
+# ##############################################################################
+softmax = tf.nn.softmax(logits, dim=axis_c)
+print('softmax ' + str(softmax.shape))
+print(sess.run(softmax))
+print('#' * 60)
 
-sampled_logits = corrupt_logits(logits, sigma)
+# exps = tf.exp(logits - tf.reduce_max(logits, axis=axis_c))
+# softmax_self = tf.divide(exps, tf.reduce_sum(exps, axis=axis_c))
+# print('softmax_self ' + str(softmax_self.shape))
+# print(sess.run(softmax_self))
+# print('#' * 60)
+#
+logits_true_class = tf.multiply(softmax, label_one_hot)
+# print('logits_true_class ' + str(logits_true_class.shape))
+# print(sess.run(logits_true_class))
+# print('#' * 60)
 
-print('corrupted_logits ' + str(sampled_logits.shape))
-print(sess.run(sampled_logits))
-print('#' * 40)
+# reduce since all other entries are 0 (because of one_hot_label_mask)
+logits_true_class_rs = tf.reduce_sum(logits_true_class, axis=axis_c, keep_dims=True)
+# print('logits_true_class_rs ' + str(logits_true_class_rs.shape))
+# print(sess.run(logits_true_class_rs))
+# print('#' * 60)
 
+softmax_cross_entropy_self = tf.multiply(tf.log(logits_true_class_rs), -1)
+print('softmax_cross_entropy_self ' + str(softmax_cross_entropy_self.shape))
+print(sess.run(softmax_cross_entropy_self))
+print('#' * 60)
+#
+softmax_cross_entropy = tf.nn.softmax_cross_entropy_with_logits(labels=label_one_hot, logits=logits, dim=1)
+print('softmax_cross_entropy ' + str(softmax_cross_entropy.shape))
+print(sess.run(softmax_cross_entropy))
+print('#' * 25)
+loss = tf.reduce_mean(softmax_cross_entropy)
+print('loss ' + str(loss.shape))
+print(sess.run(loss))
+print('#' * 25)
+
+##############################################################################
+# ADD NOISE
 
 sampled_logits = sample_corrupt_logits(logits, sigma, T_samples)
-
 print('sampled_corrupted_logits ' + str(sampled_logits.shape))
 print(sess.run(sampled_logits))
-print('#' * 40)
+# dim for n_classes changes when adding sample dim
+axis_c = 2
 
-sampled_softmax_logits = tf.nn.softmax(sampled_logits, dim = 2)
+# squash with softmax (optional)
+# sampled_softmax_logits = tf.nn.softmax(sampled_logits, dim = axis_c)
+# print('sampled_corrupted_softmax_logits ' + str(sampled_softmax_logits.shape))
+# print(sess.run(sampled_softmax_logits))
+# print('#' * 40)
 
-print('sampled_corrupted_softmax_logits ' + str(sampled_softmax_logits.shape))
-print(sess.run(sampled_softmax_logits))
-print('#' * 40)
+print('#' * 60)
+##############################################################################
 
-#print('logits_softmax ' + str(logits_softmax.shape))
-#logits_softmax = tf.nn.softmax(logits, dim=1 )
-#print(sess.run(logits_softmax))
+# doesn't work 5-dimensional
+# softmax_cross_entropy = tf.nn.softmax_cross_entropy_with_logits(
+#     labels=label_one_hot, logits=sampled_logits, dim=axis_c)
+# print('softmax_cross_entropy ' + str(softmax_cross_entropy.shape))
+# print(sess.run(softmax_cross_entropy))
+# print('#' * 25)
 
-#print('logits_maxed ' + str(logits_maxed.shape))
-#logits_maxed = tf.reduce_max(logits_soft, axis=1)
-#print(sess.run([logits_soft, logits_maxed]))
+softmax_sample_logits = tf.nn.softmax(sampled_logits, dim=axis_c)
+print('softmax_sample_logits ' + str(softmax_sample_logits.shape))
+print(sess.run(softmax_sample_logits))
+print('#' * 25)
 
-logits = sampled_softmax_logits
-print('#' * 20)
+##############################################################################
+# CROSSENTROPY
+#  select (softmaxed) logits (simulating a bool mask by setting unneeded values to zero)
+#  then negative log
 
-#######################################
+sm_logits_true_class = tf.multiply(softmax_sample_logits, label_one_hot)
+# print('sm_logits_true_class ' + str(sm_logits_true_class.shape))
+# print(sess.run(sm_logits_true_class))
+# print('#' * 60)
 
-#label_one_hot = tf.cast(label_one_hot, tf.bool)# [batch_size, x, y, classes]
-#logits_true_class = tf.boolean_mask(logits, label_one_hot)
-logits_true_class = tf.multiply(logits, label_one_hot)
-#logits_other_classes = tf.boolean_mask(logits, tf.logical_not(label_one_hot))
-logits_other_classes = tf.multiply(logits, (label_one_hot - 1)*(-1))
+# reduce since all other entries are 0 (because of one_hot_label_mask)
+sm_logits_true_class_rs = tf.reduce_sum(sm_logits_true_class, axis=axis_c, keep_dims=True)
+# print('sm_logits_true_class_rs ' + str(sm_logits_true_class_rs.shape))
+# print(sess.run(sm_logits_true_class_rs))
+# print('#' * 60)
 
-print('logits_true_class ' + str(logits_true_class.shape))
-print(sess.run(logits_true_class))
-print('logits_other_classes ' + str(logits_other_classes.shape))
-print(sess.run(logits_other_classes))
-print('#' * 40)
+sampled_sm_cross_entropy_self = tf.multiply(tf.log(sm_logits_true_class_rs), -1)
+print('sampled_sm_cross_entropy_self ' + str(sampled_sm_cross_entropy_self.shape))
+print(sess.run(sampled_sm_cross_entropy_self))
+print('#' * 60)
+loss1 = tf.reduce_mean(sampled_sm_cross_entropy_self)
+print('loss1 ' + str(loss1.shape))
+print(sess.run(loss1))
+print('#' * 25)
 
-logits_true_class_rs = tf.reduce_sum(logits_true_class, axis=2, keep_dims=True)
-logits_other_classes_rs = tf.log(tf.reduce_sum(tf.exp(logits_other_classes), axis=2, keep_dims=True))
+# ##############################################################################
+# # SUMMING
+#
+# sum1_exp = tf.exp(sampled_logits)  # was logits_other_classes
+# print('sum1_exp ' + str(sum1_exp.shape))
+# print(sess.run(sum1_exp))
+#
+# sum1_exp_rm1 = tf.exp(sampled_logits) - label_one_hot # after exp() tensor has 1 where was 0
+# print('sum1_exp_rm0 ' + str(sum1_exp_rm1.shape))
+# print(sess.run(sum1_exp_rm1))
+#
+# sum1_rs = tf.reduce_sum(sum1_exp_rm1, axis=axis_c, keep_dims=True)
+# print('sum1_rs ' + str(sum1_rs.shape))
+# print(sess.run(sum1_rs))
+#
+# sum1_log = tf.log(sum1_rs)
+# print('sum1_log ' + str(sum1_log.shape))
+# print(sess.run(sum1_rs))
+#
+# print('#' * 25)
+# # sum1: over other classes
+# sum1_other_classes = tf.log(tf.reduce_sum(tf.exp(sampled_logits) - label_one_hot, axis=axis_c, keep_dims=True))
+# print('sum1_other_classes ' + str(logits_true_class_rs.shape))
+# print(sess.run(sum1_other_classes))
+# print('#' * 25)
+#
+#
+# print('#' * 60)
+#
+# sum2_diff = logits_true_class_rs - sum1_other_classes
+# print('sum2_diff ' + str(sum2_diff.shape))
+# print(sess.run(sum2_diff))
+#
+# sum2_exp = tf.exp(sum2_diff)
+# print('sum2_exp ' + str(sum2_exp.shape))
+# print(sess.run(sum2_exp))
+#
+# print('#' * 25)
+# # sum2: over samples. divide by number of samples -> reduce mean
+# sum2_samples = tf.reduce_mean(tf.exp(logits_true_class_rs - sum1_other_classes), axis=0)
+# print('sum2_samples ' + str(sum2_samples.shape))
+# print(sess.run(sum2_samples))
+# print('#' * 25)
+#
+# print('#' * 60)
+# sum3_pixels = tf.log(sum2_samples)
+# print('sum3_pixels ' + str(sum3_pixels.shape))
+# print(sess.run(sum3_pixels))
+#
+# print('#' * 25)
+# # sum over and divide by number of pixels
+# loss_aletaoric = tf.reduce_mean(tf.log(sum2_samples))
+# print('loss_aletaoric ' + str(loss_aletaoric.shape))
+# print(sess.run(loss_aletaoric))
+# print('#' * 25)
 
-print('logits_true_class_rs ' + str(logits_true_class_rs.shape))
-print(sess.run(logits_true_class_rs))
-print('logits_other_classes_rs ' + str(logits_other_classes_rs.shape))
-print(sess.run(logits_other_classes_rs))
-print('#' * 40)
 
-#print(sess.run([logits, logits_true_class_rs]))
+# loss_aletaoric = tf.reduce_sum(tf.log(sum2_samples)) --> inf
+# loss_aletaoric = tf.reduce_mean(tf.log(sum2_samples)) --> -0.259 --> nan
 
-#######################################
 
-in_sum_t = logits_other_classes_rs - logits_true_class_rs
 
-print('in_sum_t ' + str(in_sum_t.shape))
-print(sess.run(in_sum_t))
-print('#' * 40)
 
-#######################################
 
-sum_t = tf.divide(tf.reduce_sum(in_sum_t, axis=0), T_samples)
 
-print('sum_t ' + str(sum_t.shape))
-print(sess.run(sum_t))
-print('#' * 40)
+
+
+
+
+
+
+
 
 ##############################################################################
 ##############################################################################
@@ -224,21 +318,6 @@ print('#' * 40)
 
 
 #sum1 = tf.reduce_sum(logits_other_classes, axis=2, keep_dims=True)
-
-logits_other_classes_rs = tf.log(tf.reduce_sum(tf.exp(logits_other_classes), axis=2, keep_dims=True))
-
-
-
-#V = logits[b, x, y, c]
-
-# [[['b0x0y0c0', 'b0x1y0c0']['b0x0y0c1' 'b0x1y0c1'
-# ['b0x0y1c0' 'b0x1y1c0']]   'b0x0y1c1' 'b0x1y1c1']
-#
-#  ['b1x0y0c0' 'b1x1y0c0'['b1x0y0c1' 'b1x1y0c1'
-#                         'b1x0y1c0' 'b1x1y1c0']   'b1x0y1c1' 'b1x1y1c1']]
-#
-# labels[b, x, y, c]
-
 
 
 ##############################################################################

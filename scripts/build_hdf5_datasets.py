@@ -16,10 +16,15 @@ from util import data_hdf5
 logs.initConsoleLogger()
 
 
-hdf5_folder = '/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/data/hdf5/'
-datasources = ['/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/' +
-               'data/hdf5/std_data_v0_2_merged.h5']
+# hdf5_folder = '/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/data/hdf5/'
+# datasources = ['/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/' +
+#                'data/hdf5/std_data_v0_2_merged.h5']
+#
+# data_hdf5.split_into_sets(hdf5_folder = hdf5_folder, dest_folder=hdf5_folder, datasources=datasources,
+#                      element_axis=0, validate=False,
+#                      chunks=None)
 
-data_hdf5.split_into_sets(hdf5_folder = hdf5_folder, dest_folder=hdf5_folder, datasources=datasources,
-                     element_axis=0, validate=False,
-                     chunks=None)
+# datasource1 = '/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/data/hdf5/std_data_v0_2_pdf/train/std_data_v0_2_pdf_train_2.h5'
+
+hdf5_folder = '/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/data/hdf5/std_data_v0_2_pdf/train'
+data_hdf5.merge_hdf5(hdf5_folder = hdf5_folder )
