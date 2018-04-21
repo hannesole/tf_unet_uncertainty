@@ -35,11 +35,11 @@ class UNet():
                  is_training=False, keep_prob=None,  # params for UNet architecture
                  n_contracting_blocks=5, n_start_features=8,
                  norm_fn=None, normalizer_params=None,
-                 aleatoric_samples=None, aleatoric_distr=None,
+                 aleatoric_sample_n=None,
                  copy_script_dir=None, debug=False,  # other stuff
                  opts_main=None, opts_val=None,  # for datalayer
                  train_dir=None,
-                 sess=None # for val_fn
+                 sess=None  # for val_fn
                  ):
         '''
         Creates the Unet Model with TFRecords data layer. Most params are optional and have default values.
@@ -61,9 +61,6 @@ class UNet():
         :param copy_script_dir: (optional) if provided, the model.py file is copied to this directory.
         :param debug: (optional) False by default. If True, image.summaries (large!) are added to the event log.
         '''
-        # if shape_label is None: shape_label = [shape_img[0], shape_img[1], 1]
-        # if shape_weights is None: shape_weights = [shape_img[0], shape_img[1], 1]
-
         # set keep_prob default during training, otherwise 1
         if keep_prob is None:
             self.keep_prob = 0.9 if is_training else 1.
@@ -71,24 +68,20 @@ class UNet():
             self.keep_prob = keep_prob  # Giving a param overrides this default
 
         self.is_training = is_training
-        self.aleatoric_samples = aleatoric_samples
+        # needed to decide whether to create a sigma output layer or not. Rest of options go to create_train_op.
+        self.aleatoric_sample_n = aleatoric_sample_n
 
+        # in case any op writes file output (e.g. val summary)
         self.train_dir = train_dir
         self.sess = sess
 
-        # for datalayers
-        self.opts_main = opts_main
-        self.opts_val = opts_val
+        # contains specific opts, e.g. for datalayers
+        self.opts_main = opts_main  # opts.train or opts.test
+        self.opts_val = opts_val    # opts only for validation
 
-        # for train_op
+        # for datalayers/train_op
         self.n_class = opts_main.n_class
         self.resize = opts_main.resize
-        # self.shuffle = shuffle
-        # self.batch_size = batch_size
-
-        #TODO safe to remove when TFRecords layer is deleted
-        self.init_objects = []  # data layer may generate objects to be initialized
-        self.close_objects = []  # ... or closed when creating a session
 
         self.debug = debug
 
@@ -141,7 +134,7 @@ class UNet():
             return (batch_img, batch_label, batch_weights)
 
         if opts_val is None:
-            # if validation options are not defined, use training set by default
+            # if validation options are not defined, only use training data_layer
             self.batch_img, self.batch_label, self.batch_weights = f_data_train()
         else:
             # if validation options are defined, create two data layers and feedable switch 'use_train_data'
@@ -151,57 +144,82 @@ class UNet():
 
 
         ## NETWORK
-        self.output_mask, self.sigma, self.prediction \
+        self.output_mask, self.prediction, self.sigma_activations \
             = self._build_net(self.batch_img, n_class=self.n_class,
                               n_features_start=n_start_features, n_blocks_down=n_contracting_blocks,
                               is_training=self.is_training, keep_prob=self.keep_prob,
-                              aleatoric_samples = aleatoric_samples,
+                              aleatoric_samples = aleatoric_sample_n,
                               norm_fn=norm_fn, normalizer_params=normalizer_params
                               )
-        # logging.info('Created UNet with Input size %s and Output Tensor %s' % (str(shape_img), str(self.output_mask)))
 
-        ## OUTPUT TEST
-        #if not is_training:
-         #   self.output_mask = tf.nn.softmax(self.output_mask)
-
-        # if any layer created init/close objects dependent on session, remind user to init/close them
-        if not self.init_objects == [] or not self.close_objects == []:
-            logging.info(
-                '\n#################################################\n' +
-                'Make sure to init objects when running net: %s\n' % (str(self.init_objects)) +
-                'Make sure to close objects after running net: %s\n' % (str(self.close_objects)) +
-                '#################################################'
-            )
-
+        logging.info('Created UNet with input %s and output tensors %s%s'
+                     % (str(self.batch_img.shape), str(self.output_mask.shape),
+                        ('' if self.sigma_activations is None else (' | sigma %s'  % str(self.sigma_activations.shape)))))
 
 
 
     # #########   TRAIN OPERATION    #########
     # ----------------------------------------
-    def create_train_op(self, learning_rate, optimizer='Adam', img_summary=True):
+    def create_train_op(self, opts, img_summary=True, metrics=True):
         '''
         Creates train op with loss, learning rate and optimization parameters.
         Includes creating summaries.
 
-        :param learning_rate:
+        :param opts: option object that
+        allows access to options via opts.learning_rate_init, opts.optimizer ...
+        should contain train options
         :return:
         '''
-
-        def resizer(image_batch, size=[128, 128]):
-            return tf.image.resize_images(image_batch, size) if self.resize is None else image_batch
-
         with tf.variable_scope('Train_op'):
             self.global_step = tf.train.get_or_create_global_step()
 
-            # # METRICS
-            # # ------------------------
-            # with tf.variable_scope('metrics'):
-            #     # prediction_4D = tf.expand_dims(self.prediction, axis=-1)
-            #     accuracy, _ = tf.metrics.accuracy(self.batch_label, self.prediction)
-            #     tf.summary.scalar('accuracy', accuracy)
+            # LOSS FUNCTIONS
+            # ------------------------
+            # compute multiple losses but only use one for optimization
+            with tf.variable_scope('losses'):
+                # store label one-hot encoded (one channel per class)
+                #  before tf.one_hot, tf.squeeze removes (empty) last dim, otherwise shape will be (batch_size, x, y, 1, n_classes):
+                self.batch_label_one_hot = tf.one_hot(tf.squeeze(self.batch_label, axis=-1), self.n_class, axis=-1)
 
-            if img_summary:  # takes a lot of space
-                with tf.variable_scope('img_summary'):
+                # softmaxCE LOSS (cross entropy loss with softmax)
+                softmaxCE = tf.nn.softmax_cross_entropy_with_logits(labels=self.batch_label_one_hot,
+                                                                         logits=self.output_mask)
+
+                # above returns shape [batch_size, img.shape[1], img.shape[2]]
+                # needs to be compatible with [batch_size, img.shape[1], img.shape[2] 1] for self.batch_weights
+                softmaxCE = tf.expand_dims(softmaxCE, axis=-1)
+                # weighted loss
+                softmaxCE_w = tf.multiply(softmaxCE, self.batch_weights)
+
+                loss_softmaxCE_w = tf.reduce_mean(softmaxCE_w)
+                tf.summary.scalar('loss/weighted_softmax_cross_entropy', loss_softmaxCE_w)
+                loss_softmaxCE = tf.reduce_mean(softmaxCE)
+                tf.summary.scalar('loss/softmax_cross_entropy', loss_softmaxCE)
+
+
+                # set loss used for optimization
+                if self.aleatoric_sample_n is None:
+                    self.loss = loss_softmaxCE_w
+                else:
+                # UNCERTAINTY LOSS
+                # -----------------
+                    loss_aletaoric, sigma, sampled_logits = \
+                        uncertainty.aleatoric_loss(self.output_mask, self.batch_label_one_hot,
+                                                   self.sigma_activations, self.aleatoric_sample_n,
+                                                   regularization=opts.aleatoric_reg)
+
+                    self.loss = loss_aletaoric
+                    tf.summary.scalar('loss/aleatoric_loss', self.loss)
+                # -----------------
+
+            # IMAGE SUMMARY
+            # ------------------------
+            # adds images to the summary. This might make the events file huge and make loading/writing slow.
+            if img_summary:
+                def resizer(image_batch, size=[128, 128]):
+                    return tf.image.resize_images(image_batch, size) if self.resize is None else image_batch
+
+                with tf.variable_scope('img_summary'): # numbered to control order in tensorboard
                     tf.summary.image('0_img', resizer(self.batch_img[..., 0:3]))
                     tf.summary.image('0_label', resizer(tf.cast(self.batch_label, tf.float32)))
                     tf.summary.image('0_weights', resizer(self.batch_weights))
@@ -211,79 +229,30 @@ class UNet():
                     softmax = tf.nn.softmax(logits=self.output_mask)
                     tf.summary.image('3_softmax_c0', resizer(softmax[..., 0, np.newaxis]))
                     tf.summary.image('3_softmax_c1', resizer(softmax[..., 1, np.newaxis]))
-                    max_softmax = tf.argmax(softmax, axis=-1)
-                    max_softmax = tf.cast(max_softmax, dtype=tf.float32)
+                    max_softmax = tf.argmax(softmax, axis=-1) # = self.prediction
+                    max_softmax = tf.cast(max_softmax, dtype=tf.float32) # needed to be displayed by summary.image
                     tf.summary.image('1_segmentation', resizer(max_softmax[..., np.newaxis]))
 
-
-            # LOSS FUNCTIONS
-            # ------------------------
-            with tf.variable_scope('losses'):
-                self.batch_label_idx = tf.squeeze(self.batch_label, axis=-1)
-                # store label one-hot encoded (one channel per class)
-                # before tf.one_hot, tf.squeeze removes (empty) last dim, otherwise shape will be (batch_size, x, y, 1, n_classes):
-                self.batch_label_oh = tf.one_hot(tf.squeeze(self.batch_label, axis=-1), self.n_class, axis=-1)
-
-                # if img_summary:
-                #     with tf.variable_scope('img_summary'):
-                #         tf.summary.image('label_one_hot_c0', tf.image.resize_images(self.batch_label_oh[..., 0, np.newaxis], [256, 256]))
-                #         tf.summary.image('label_one_hot_c1', tf.image.resize_images(self.batch_label_oh[..., 1, np.newaxis], [256, 256]))
-
-                with tf.variable_scope('softmax_cross_entropy_with_logits'):
-                    # softmaxCE LOSS (cross entropy loss with softmax)
-                    loss_softmaxCE = tf.nn.softmax_cross_entropy_with_logits(labels=self.batch_label_oh,
-                                                                             logits=self.output_mask)
-                    # above returns shape [batch_size, img.shape[1], img.shape[2]]
-                    # needs to be compatible with [batch_size, img.shape[1], img.shape[2] 1] for self.batch_weights
-                    loss_softmaxCE = tf.expand_dims(loss_softmaxCE, axis=-1)
-
-                    # weighted loss
-                    loss_softmaxCE_w = tf.multiply(loss_softmaxCE, self.batch_weights)
-
-                    if img_summary:
-                        with tf.variable_scope('img_summary'):
-                            tf.summary.image('softmax_CE', resizer(loss_softmaxCE))
-                            tf.summary.image('softmax_CE_weighted', resizer(loss_softmaxCE_w))
-
-                    loss_softmaxCE_w = tf.reduce_mean(loss_softmaxCE_w)
-                    tf.summary.scalar('loss/weighted_softmax_cross_entropy', loss_softmaxCE_w)
-                    loss_softmaxCE = tf.reduce_mean(loss_softmaxCE)
-                    tf.summary.scalar('loss/softmax_cross_entropy', loss_softmaxCE)
-
-
-                # set loss used for optimization
-                if self.aleatoric_samples is None:
-                    self.loss = loss_softmaxCE_w
-                    tf.summary.scalar('loss/optimize_loss', self.loss)
-            # ------------------------
-
-            # # UNCERTAINTY
-            # # --------------
-            if self.aleatoric_samples is not None:
-                with tf.variable_scope('uncertainty'):
-                    loss_aletaoric, sampled_logits = \
-                        uncertainty.aleatoric_loss(self.output_mask, self.batch_label_oh,
-                                                   self.sigma, self.aleatoric_samples)
-
-                    self.loss = loss_aletaoric
-                    tf.summary.scalar('loss/aleatoric_loss', self.loss)
-
-                    sigma_min = tf.reduce_min(self.sigma)
-                    tf.summary.scalar('stats/sigma_min', sigma_min)
-                    sigma_max = tf.reduce_max(self.sigma)
-                    tf.summary.scalar('stats/sigma_max', sigma_max)
-                    sigma_avg = tf.reduce_mean(self.sigma)
-                    tf.summary.scalar('stats/sigma_avg', sigma_avg)
-
-                if img_summary:  # takes a lot of space
-                    with tf.variable_scope('img_summary_uncertainty'):
-                        tf.summary.image('1_sigma_c0', resizer(self.sigma[..., 0, np.newaxis]))
-                        tf.summary.image('1_sigma_c1', resizer(self.sigma[..., 1, np.newaxis]))
+                    if self.aleatoric_sample_n is not None:
                         averaged_sampled_logits = tf.reduce_mean(sampled_logits, axis=0)
-                        tf.summary.image('0_corrupt_prediction_c0', resizer(averaged_sampled_logits[..., 0, np.newaxis]))
-                        tf.summary.image('0_corrupt_prediction_c1', resizer(averaged_sampled_logits[..., 1, np.newaxis]))
+                        tf.summary.image('2_corrupt_sm_logits_c0', resizer(averaged_sampled_logits[..., 0, np.newaxis]))
+                        tf.summary.image('2_corrupt_sm_logits_c1', resizer(averaged_sampled_logits[..., 1, np.newaxis]))
+                        tf.summary.image('1_sigma', resizer(sigma))
+                        uncertainty_map = uncertainty.gaussian_entropy(sigma)
+                        tf.summary.image('1_uncertainty_map', resizer(uncertainty_map))
+                        # for uncertainty per class
+                        # tf.summary.image('4_sigma_c0', resizer(sigma[..., 0, np.newaxis]))
+                        # tf.summary.image('4_sigma_c1', resizer(sigma[..., 1, np.newaxis]))
+                        # tf.summary.image('1_uncertainty_map_c0', resizer(uncertainty_map[..., 0, np.newaxis]))
+                        # tf.summary.image('1_uncertainty_map_c1', resizer(uncertainty_map[..., 1, np.newaxis]))
 
+                    tf.summary.image('4_softmax_CE', resizer(softmaxCE))
+                    tf.summary.image('4_softmax_CE_weighted', resizer(softmaxCE_w))
+
+            # LEARNING RATE / STATS
+            # ------------------------
             with tf.variable_scope('stats'):
+                # activation range
                 activation_min = tf.reduce_min(self.output_mask)
                 tf.summary.scalar('activation_min', activation_min)
                 activation_max = tf.reduce_max(self.output_mask)
@@ -291,79 +260,50 @@ class UNet():
                 activation_avg = tf.reduce_mean(self.output_mask)
                 tf.summary.scalar('activation_avg', activation_avg)
 
-            # LEARNING RATE
-            with tf.variable_scope('learning_rate'):
-                self.learning_rate = tf.train.exponential_decay(learning_rate,
+                # sigma_activations range
+                if self.aleatoric_sample_n is not None:
+                    sigma_min = tf.reduce_min(self.sigma_activations)
+                    tf.summary.scalar('sigma_min', sigma_min)
+                    sigma_max = tf.reduce_max(self.sigma_activations)
+                    tf.summary.scalar('sigma_max', sigma_max)
+                    sigma_avg = tf.reduce_mean(self.sigma_activations)
+                    tf.summary.scalar('sigma_avg', sigma_avg)
+
+                if metrics:
+                    #TODO all metrics are somehow always 0
+                    # adjust prediction shape (is (1, ?, ?) vs label (1, ?, ?, 1))
+                    prediction_4D = tf.expand_dims(self.prediction, axis=-1)
+
+                    accuracy, _ = tf.metrics.accuracy(self.batch_label, prediction_4D)
+                    tf.summary.scalar('z_accuracy', accuracy)
+                    mean_iou, _ = tf.metrics.mean_iou(self.batch_label, prediction_4D, self.n_class)
+                    tf.summary.scalar('z_mean_iou', mean_iou)
+                    precision, _ = tf.metrics.precision(self.batch_label, prediction_4D)
+                    tf.summary.scalar('z_precision', precision)
+                    recall, _ = tf.metrics.recall(self.batch_label, prediction_4D)
+                    tf.summary.scalar('z_recall', recall)
+
+                # LEARNING RATE
+                self.learning_rate = tf.train.exponential_decay(opts.learning_rate_init,
                                                                 global_step=self.global_step,
-                                                                decay_rate=0.5,
-                                                                decay_steps=50000)
-                tf.summary.scalar('learning_rate', self.learning_rate)
+                                                                decay_rate=opts.learning_rate_decay,
+                                                                decay_steps=opts.max_iter)
+                tf.summary.scalar('Learning_rate', self.learning_rate)
+            # ------------------------
 
             # OPTIMIZATION (backpropagation alg)
             self.train_op = tc.layers.optimize_loss(loss=self.loss,
                                                     global_step=self.global_step,
                                                     learning_rate=self.learning_rate,
-                                                    optimizer=optimizer)
+                                                    optimizer=opts.optimizer)
 
-            # SUMMARY
+            # merge summaries to have only one op to rule them all
             self.merged_summary = tf.summary.merge_all()
             return self.train_op, self.global_step, self.loss, self.merged_summary
 
 
-
-    # #########   TEST OPERATION     #########
+    # #########     VALIDATION       #########
     # ----------------------------------------
-    def metrics(self):
-        '''
-        Creates test op that returns data, label and prediction batch tensors
-        as well as certain metrics
-
-        :param learning_rate:
-        :return:
-        '''
-
-        self.global_step = tf.train.get_or_create_global_step()
-        # prediction is (1, ?, ?), label (1, ?, ?, 1)
-        prediction_4D = tf.expand_dims(self.prediction, axis=-1)
-
-        accuracy = tf.metrics.accuracy(self.batch_label, prediction_4D)
-        accuracy_per_class = tf.metrics.mean_per_class_accuracy(self.batch_label, prediction_4D, self.n_class)
-        mean_iou = tf.metrics.mean_iou(self.batch_label, prediction_4D, self.n_class)
-        precision = tf.metrics.precision(self.batch_label, prediction_4D)
-        recall = tf.metrics.recall(self.batch_label, prediction_4D)
-
-        return  accuracy, precision, recall, accuracy_per_class, mean_iou
-
-    # #########   TEST OPERATION     #########
-    # ----------------------------------------
-    def test_op(self):
-        '''
-        Creates test op that returns data, label and prediction batch tensors
-        as well as certain metrics
-
-        :param learning_rate:
-        :return:
-        '''
-
-        self.global_step = tf.train.get_or_create_global_step()
-        # prediction is (1, ?, ?), label (1, ?, ?, 1)
-        prediction_4D = tf.expand_dims(self.prediction, axis=-1)
-
-        accuracy = tf.metrics.accuracy(self.batch_label, prediction_4D)
-        accuracy_per_class = tf.metrics.mean_per_class_accuracy(self.batch_label, prediction_4D, self.n_class)
-        mean_iou = tf.metrics.mean_iou(self.batch_label, prediction_4D, self.n_class)
-        precision = tf.metrics.precision(self.batch_label, prediction_4D)
-        recall = tf.metrics.recall(self.batch_label, prediction_4D)
-
-        softmax = tf.nn.softmax(logits=self.output_mask)
-
-        return [self.batch_img, self.batch_label, self.batch_weights,
-                self.output_mask, softmax, self.prediction,
-                accuracy, precision, recall,
-                accuracy_per_class, mean_iou
-                ]
-
-
     def setup_val_ops(self):
         """ Needs to be run if net is supposed to do validation during training. """
         if self.opts_val is None:
@@ -388,7 +328,6 @@ class UNet():
                 if self.opts_val.val_dir is not None:
                     self.val_dir = filesys.find_or_create_val_dir(train_dir=self.train_dir,
                                                                   val_dir=self.opts_val.val_dir)
-            logging.info('Setup validation ops: ' + str(val_ops))
             return val_ops
 
 
@@ -461,6 +400,36 @@ class UNet():
         pass
 
 
+    # #########   TEST OPERATION     #########
+    # ----------------------------------------
+    def test_op(self):
+        '''
+        Creates test op that returns data, label and prediction batch tensors
+        as well as certain metrics
+
+        :param learning_rate:
+        :return:
+        '''
+
+        self.global_step = tf.train.get_or_create_global_step()
+        # prediction is (1, ?, ?), label (1, ?, ?, 1)
+        prediction_4D = tf.expand_dims(self.prediction, axis=-1)
+
+        accuracy = tf.metrics.accuracy(self.batch_label, prediction_4D)
+        accuracy_per_class = tf.metrics.mean_per_class_accuracy(self.batch_label, prediction_4D, self.n_class)
+        mean_iou = tf.metrics.mean_iou(self.batch_label, prediction_4D, self.n_class)
+        precision = tf.metrics.precision(self.batch_label, prediction_4D)
+        recall = tf.metrics.recall(self.batch_label, prediction_4D)
+
+        softmax = tf.nn.softmax(logits=self.output_mask)
+
+        return [self.batch_img, self.batch_label, self.batch_weights,
+                self.output_mask, softmax, self.prediction,
+                accuracy, precision, recall,
+                accuracy_per_class, mean_iou
+                ]
+
+
 
     # #########   DATA LAYER    #########
     # -----------------------------------
@@ -476,13 +445,17 @@ class UNet():
                           ):
         '''
         Builds a data layer and adds it to the graph. The type of the data layer is determined by data_layer_type.
-        Available datalayers are tfrecords, hdf5_dset, hdf5_tables and feed_dict (default).
+        Available datalayers are tfrecords (deprecated, using queues, needs to be ported to tf.dataset),
+        hdf5 and feed_dict (default).
         Required Parameters depend on the data layer.
 
         Note:
         - some data layers require additional actions during session that cannot be wrapped by this function,
-            since they require a tf.Session to be started. See datalayer doc for specifics.
+            since they require a tf.Session to be started. See datalayer doc for specifics
+            (deprecated, only applies to queues, i.e. tfrecords layer)
         - The feed_dict layer cannot be (easily) used for training with tfutils.SimpleTrainer.
+            you may need to write your own main_loop or modify SimpleTrainer.
+            feed_dict is not recommended for training anyways though (supposedly slow).s
 
         :param dataset_pth: Path to the dataset. Required by all but feed_dict.
         :param shape_img: Shape of the img data. Required by tfrecords and feed_dict.
@@ -493,6 +466,8 @@ class UNet():
         :param is_training: defaults to False (testing) if not provided
         :return:
         '''
+        if shape_label is None: shape_label = [shape_img[0], shape_img[1], 1]
+        if shape_weights is None: shape_weights = [shape_img[0], shape_img[1], 1]
 
         with tf.variable_scope('DataLayer_' + data_layer_type + '/' + (
                 'train_data' if is_training else 'test_data')):
@@ -509,20 +484,6 @@ class UNet():
                                           batch_size=batch_size, shuffle=shuffle, augment=augment,
                                           prefetch_n=prefetch_n, prefetch_threads=prefetch_threads,
                                           resample_n=resample_n, name=name)
-            elif data_layer_type == 'hdf5_dset':
-                #TODO: basically deprecated, use dataset API instead (hdf5)
-                hdf5loader, hdf5reader, self.batch_img, self.batch_label, self.batch_weights = \
-                    data_layers.data_HDF5Queue(dataset_pth, is_training=is_training,
-                                               batch_size=batch_size, shuffle=shuffle)
-                self.init_objects.append(hdf5loader)
-                self.close_objects.append(hdf5reader)
-            elif data_layer_type == 'hdf5_tables':
-                # TODO: basically deprecated, use dataset API instead (hdf5)
-                hdf5loader, hdf5reader, self.batch_img, self.batch_label, self.batch_weights = \
-                    data_layers.data_HDF5TableQueue(dataset_pth, is_training=is_training,
-                                                    batch_size=batch_size, shuffle=shuffle)
-                self.init_objects.append(hdf5loader)
-                self.close_objects.append(hdf5reader)
             else:  # data_layer_type=='feed_dict':
                 self.batch_img, self.batch_label, self.batch_weights = \
                     data_layers.data_tf_placeholder(
@@ -598,20 +559,22 @@ class UNet():
                                                      norm_fn=norm_fn, normalizer_params=normalizer_params,
                                                      name='fullsize' if i == 0 else str(n_blocks_down - 2 - i))
 
-        ## OUTPUT LAYER
+        ## OUTPUT LAYER(S)
         with tf.variable_scope('UNet/output_mask'):
-            # self.output_mask = fully connected layer at the end
-            self.output_mask = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
+            # self.output_mask = reduce feature space (map features to n_classes, essentially a classifier)
+            output_mask = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
+            # add sigma_activations for aleatoric loss (learned uncertainty map)
             if aleatoric_samples is not None:
-                self.sigma = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
+                # per class sigma (per class uncertainty)
+                #sigma_activations = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
+                # per pixel uncertainty
+                sigma_activations = tc.layers.conv2d(output_prev_layer, 1, [1, 1], activation_fn=None)
             else:
-                self.sigma = None
+                sigma_activations = None
 
-            if True: # not self.is_training:
-                self.prediction = tf.argmax(tf.nn.softmax(self.output_mask), axis=-1, output_type=tf.int32)
-                return self.output_mask, self.sigma, self.prediction
-            else:
-                return self.output_mask, self.sigma, None
+            # prediction is the predicted label mask/segmentation (essentialy argmax(softmax))
+            prediction = tf.argmax(tf.nn.softmax(output_mask), axis=-1, output_type=tf.int32)
+            return output_mask, prediction, sigma_activations
 
 
     @property

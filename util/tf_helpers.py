@@ -15,7 +15,7 @@ def initialize_uninitialized(sess, vars=None):
     is_not_initialized = sess.run([tf.is_variable_initialized(var) for var in init_vars])
     not_initialized_vars = [v for (v, f) in zip(init_vars, is_not_initialized) if not f]
 
-    logging.debug('> initialize_uninitialized. Found %s ' % str(len(not_initialized_vars)))
+    logging.debug('> Initialize_uninitialized variables. Found %s ' % str(len(not_initialized_vars)))
     if len(not_initialized_vars):
         print(' [...] '.join([str(not_initialized_vars[i].name) for i in [0, len(not_initialized_vars) - 1]]))
         sess.run(tf.variables_initializer(not_initialized_vars))

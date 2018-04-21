@@ -48,8 +48,8 @@ sigma = tf.constant(
             [0.079628694,0.08301997,0.037294245,0.061025727],
             [0.03026377,0.08446696,0.08468499,0.01163864],
             [0.06305574,0.09808638,0.08773422,0.05724373,]]]])
-# sigma = tf.multiply(sigma, 0)
-print('sigma ' + str(sigma.shape))
+# sigma_activations = tf.multiply(sigma_activations, 0)
+print('sigma_activations ' + str(sigma.shape))
 print(sess.run(sigma))
 print('#' * 40)
 
@@ -324,8 +324,8 @@ print('#' * 25)
 ##############################################################################
 # FIRST VERSION IN MODEL TRAIN OP
 
-# # created [aleatoric_samples] of corrupted logits
-# sampled_logits = sample_corrupt_logits(logits, sigma, self.aleatoric_samples)  # [samples, batch_size, x, y, classes]
+# # created [aleatoric_sample_n] of corrupted logits
+# sampled_logits = sample_corrupt_logits(logits, sigma_activations, self.aleatoric_sample_n)  # [samples, batch_size, x, y, classes]
 #
 # # mask with one_hot_labels (but keep dims)
 # logits_true_class = tf.multiply(sampled_logits, label_one_hot)
@@ -341,8 +341,8 @@ print('#' * 25)
 # loss_aletaoric = tf.reduce_mean(sum2_samples)
 
 #
-# # created [aleatoric_samples] of corrupted logits
-# sampled_logits = sample_corrupt_logits(logits, sigma, self.aleatoric_samples)  # [samples, batch_size, x, y, classes]
+# # created [aleatoric_sample_n] of corrupted logits
+# sampled_logits = sample_corrupt_logits(logits, sigma_activations, self.aleatoric_sample_n)  # [samples, batch_size, x, y, classes]
 # # squash with softmax for numerical stability
 #
 # # reduced since all other entries are 0 (because of one_hot_label_mask)

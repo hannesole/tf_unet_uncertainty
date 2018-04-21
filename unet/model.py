@@ -313,7 +313,7 @@ class UNet():
         with tf.variable_scope('UNet/output_mask'):
             # self.output_mask = fully connected layer at the end
             self.output_mask = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
-            self.sigma = 0  # tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None, name="sigma")
+            self.sigma = 0  # tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None, name="sigma_activations")
 
             if not self.is_training:
                 self.prediction = tf.argmax(tf.nn.softmax(self.output_mask), axis=-1, output_type=tf.int32)

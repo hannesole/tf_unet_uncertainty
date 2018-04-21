@@ -217,15 +217,14 @@ def train_core(sess, net):
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized variables")
 
     # set train_op and summaries
-    logging.info('Create Training step (set loss, summary and global_step)')
+    logging.info('Setup training op (set loss, global_step and tensorboard summaries)')
     train_op, global_step, loss, merged_summary = \
-        net.create_train_op(opts_train.init_learning_rate, opts_train.optimizer,
-                            img_summary=True)
+        net.create_train_op(opts_train, img_summary=True)
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
     tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
     # initializing local variables might be needed for some metrics
-    # tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
+    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # setup saver list
     saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
@@ -233,6 +232,7 @@ def train_core(sess, net):
 
     # create and setup validation ops
     val_ops = net.setup_val_ops()
+    logging.info('Setup validation ops: ' + str(val_ops))
 
     trainer.mainloop(
         max_iter=opts_train.max_iter,
@@ -283,10 +283,12 @@ def train_debug(sess, net):
     logging.info('Create Training step (set loss, summary and global_step)')
     train_op, global_step, loss, merged_summary = \
         net.create_train_op(opts_train.init_learning_rate, opts_train.optimizer,
-                            img_summary=True)
+                            img_summary=True, metrics=True)
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
-    tf_helpers.initialize_uninitialized(sess)
+    tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
+    # initializing local variables might be needed for some metrics
+    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # setup saver list
     saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
@@ -315,9 +317,7 @@ def train_debug(sess, net):
     logging.info("Safe debug model saved: %s" % save_path)
 
 
-def TRAIN(): pass
-
-
+def TRAIN(): pass # dummy function for PyCharm IDE
 if opts.train:
     logging.info('####################################################################')
     logging.info('#                            TRAINING                              #')
@@ -331,7 +331,7 @@ if opts.train:
                          n_contracting_blocks=opts.n_contracting_blocks,
                          n_start_features=opts.n_start_features,
                          norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
-                         aleatoric_samples=opts.aleatoric_samples, aleatoric_distr=opts.aleatoric_distr,
+                         aleatoric_sample_n=opts.aleatoric_sample_n,
                          copy_script_dir=args.code_copy_dir, debug=opts.debug,
                          opts_main=opts_train, opts_val=opts_val,
                          sess=sess, train_dir=args.train_dir
@@ -358,7 +358,7 @@ if opts.train:
 # -------
 def ___________________________TEST______________________________(): pass  # dummy function for PyCharm IDE
 
-
+# reset graph so that variables don't have to be reused (they will be restored from checkpoint)
 if opts.train: tf.reset_default_graph()
 
 
@@ -426,6 +426,9 @@ def test_debug(sess, net_test):
     # init variables if no checkpoint was loaded
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
+
+    #[global_step] = sess.run([net_test.global_step])
+    args.test_dir = filesys.find_or_create_test_dir(args.test_dir, args.train_dir)
 
     # ###########################################################################
     # RUN UNET
@@ -497,8 +500,6 @@ def test_metrics(sess, net_test):
     # init variables if no checkpoint was loaded
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
-
-
 
     # create test op and initialize associated variables
     test_op = net_test.test_op()
@@ -652,8 +653,7 @@ def test_sampling(sess, net_test):
         # ###########################################################################
 
 
-def TEST(): pass
-
+def TEST(): pass # dummy function for PyCharm IDE
 if opts.test:
     logging.info('####################################################################')
     logging.info('#                            TESTING                               #')

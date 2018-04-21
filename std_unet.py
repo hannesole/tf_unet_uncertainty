@@ -58,36 +58,36 @@ logs.initConsoleLogger()
 # all required flags are set to False to be able to run this script from environments w/o commandline options
 # change defaults or override commandline args below to change what you are providing
 
-args = argparse.ArgumentParser(description='UNet Training and Testing')
+parser = argparse.ArgumentParser(description='UNet Training and Testing')
 # TRAINING & TESTING arguments
-args.add_argument('--mode', '-m', metavar='mode', required=False,
+parser.add_argument('--mode', '-m', metavar='mode', required=False,
                     help="CL parameter to activate phases ['train' or 'test'] " +
                          "or modes ['tfdbg': TensorFlow CLI debugger, 'debug': Additonal debug code]. " +
                          "To activate multiple phases, just concatenate strings in arbitrary order, " +
                          "e.g. ('traintest' or 'testtrain' or 'debugtrain').",
                     default=None)
-args.add_argument('--config', '-c', metavar='config', required=False,
+parser.add_argument('--config', '-c', metavar='config', required=False,
                     help="The location of the config file. Default is config.ini in script directory.",
                     default='config.ini')
-args.add_argument('--checkpoint', '-ckp', metavar='checkpoint', required=False,
+parser.add_argument('--checkpoint', '-ckp', metavar='checkpoint', required=False,
                     help='Provide a model checkpoint file, otherwise searching for last one in train_dir/checkpoints.' +
                          'For training: Trains from scratch if no checkpoint is found.' +
                          'For testing: Breaks if no checkpoint is found (model cannot initialize).',
                     default=None)
-args.add_argument('--code_copy_dir', '-cc', metavar='code_copy_dir', required=False,
+parser.add_argument('--code_copy_dir', '-cc', metavar='code_copy_dir', required=False,
                     help='If specified, script and model .py will be copied to this dir. Default: train_dir.',
                     default='train_dir')
 
 #   for output of training / input of testing:
 #       either output_dir/name ...
-args.add_argument('--name', '-n', metavar='train_name', required=False,
+parser.add_argument('--name', '-n', metavar='train_name', required=False,
                     help='The training session name (if not specified using time only)',
                     default=time.strftime("%Y-%m-%d_%H%M"))
-args.add_argument('--output_dir', '-o', metavar='output_dir', required=False,
+parser.add_argument('--output_dir', '-o', metavar='output_dir', required=False,
                     help='Model and training files are written to train_dir=\"output_dir/name/\".',
                     default='/home/hornebeh/proj_tf_unet/output/')
 #       ... or a full train_dir path:
-args.add_argument('--train_dir', '-t', metavar='train_dir', required=False,
+parser.add_argument('--train_dir', '-t', metavar='train_dir', required=False,
                     help='Directory where models (checkpoints) are stored during training and loaded for testing. ' +
                          'Usually generated as train_dir=\"output_dir/name/\".' +
                          'Pass this if you don\'t want to specify name and dir separately ' +
@@ -97,18 +97,18 @@ args.add_argument('--train_dir', '-t', metavar='train_dir', required=False,
                     default=None)
 
 # TRAINING ARGUMENTS
-args.add_argument('--continue_training', '-ct', metavar='continue_training', required=False,
+parser.add_argument('--continue_training', '-ct', metavar='continue_training', required=False,
                     help='If True, will continue training from latest checkpoint. ' +
                          'Otherwise train_dir is recreated (avoids overwriting by appending _N).',
                     default=False)
 
 # TESTING ARGUMENTS
-args.add_argument('--test_dir', '-p', metavar='test_dir', required=False,
+parser.add_argument('--test_dir', '-p', metavar='test_dir', required=False,
                     help='Prediction is written to \"test_dir/\". ' +
                          'If not specified using prediction subfolder in train_dir.',
                     default=None)
 
-args = args.parse_args()
+args = parser.parse_args()
 
 # ######################################################################################################################
 # SCRIPT ARGS / OVERRIDE ARGS
@@ -196,8 +196,6 @@ except KeyError: opts_val = None
 # output opts to console
 print(config_util.opts_to_str(opts))
 
-opts_test.norm_fn
-
 # ######################################################################################################################
 # TRAINING
 # --------
@@ -219,15 +217,14 @@ def train_core(sess, net):
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized variables")
 
     # set train_op and summaries
-    logging.info('Create Training step (set loss, summary and global_step)')
+    logging.info('Setup training op (set loss, global_step and tensorboard summaries)')
     train_op, global_step, loss, merged_summary = \
-        net.create_train_op(opts_train.init_learning_rate, opts_train.optimizer,
-                            img_summary=True)
+        net.create_train_op(opts_train, img_summary=True)
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
     tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
     # initializing local variables might be needed for some metrics
-    # tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
+    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # setup saver list
     saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
@@ -235,6 +232,7 @@ def train_core(sess, net):
 
     # create and setup validation ops
     val_ops = net.setup_val_ops()
+    logging.info('Setup validation ops: ' + str(val_ops))
 
     trainer.mainloop(
         max_iter=opts_train.max_iter,
@@ -285,10 +283,12 @@ def train_debug(sess, net):
     logging.info('Create Training step (set loss, summary and global_step)')
     train_op, global_step, loss, merged_summary = \
         net.create_train_op(opts_train.init_learning_rate, opts_train.optimizer,
-                            img_summary=True)
+                            img_summary=True, metrics=True)
 
     # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
-    tf_helpers.initialize_uninitialized(sess)
+    tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
+    # initializing local variables might be needed for some metrics
+    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
 
     # setup saver list
     saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
@@ -317,102 +317,7 @@ def train_debug(sess, net):
     logging.info("Safe debug model saved: %s" % save_path)
 
 
-# training with my own main_loop
-def train_own(sess, net):
-    logging.info('#-----------------------------------------------#')
-    logging.info('#               Starting Training (debug)       #')
-    logging.info('#-----------------------------------------------#')
-
-    TRAIN_LOGDIR = 'trainlogs'
-    CHECKPOINTS_DIR = 'save'
-    logdir = os.path.join(args.train_dir, TRAIN_LOGDIR)
-    save_dir = os.path.join(args.train_dir, CHECKPOINTS_DIR)  # args.train_dir + os.sep + "save"
-    save_path = os.path.join(save_dir, "model.ckpt")  # save_dir + os.sep + "model.ckpt"
-
-    logging.info('Initializing or loading variables')
-    # TODO Debug saving method
-    restore_saver = tf.train.Saver()
-    if os.path.exists(save_path):
-        try:
-            logging.info("Restoring model from: %s" % save_dir)
-            # load model for continued training (if None provided, searches in train_dir, if not found doesn't load)
-            restore_saver.restore(sess, save_dir + os.sep + "model.ckpt")
-            chkpt_loaded = True
-            logging.info(" -- Restored --")
-        except:
-            chkpt_loaded = False  # if restoring fails
-    else:
-        chkpt_loaded = False  # if no saved checkpoint is found
-
-    if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
-    logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized variables")
-
-    # set train_op and summaries
-    logging.info('Create Training step (set loss, summary and global_step)')
-    train_op, global_step, loss, merged_summary = \
-        net.create_train_op(opts_train.init_learning_rate, opts_train.optimizer,
-                            img_summary=True)
-
-    # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
-    tf_helpers.initialize_uninitialized(sess)
-
-    # setup saver list
-    # saver_list = tf.global_variables() # tf.trainable_variables() might not contain all relevant variables
-    # saver_list.append(global_step) # for easy output: import pprint; pprint.pprint(saver_list)
-    # saver = tf.train.Saver(saver_list)
-    saver = tf.train.Saver()
-
-    # MAIN LOOP
-    global_step_value = sess.run(global_step)
-    summary_writer = tf.summary.FileWriter(logdir, graph=tf.get_default_graph())
-    summary_writer.add_session_log(tf.SessionLog(status=tf.SessionLog.START), global_step=global_step_value)
-
-    t_start = timer()
-    logging.info('Starting training with global_step=%s' % (str(global_step_value)))
-
-    while global_step_value < opts_train.max_iter:
-        summary, loss_val, _ = sess.run([merged_summary, loss, train_op])
-
-        # output to summary and console
-        summary_writer.add_summary(summary, global_step=global_step_value)
-        print("# {0} {1:>8} | ".format(datetime.datetime.fromtimestamp(int(time.time())), global_step_value), end="")
-        print("{0}:{1:11.4g}  ".format("loss", loss_val).ljust(20), end="")
-        print("\t {0:.4f} s  ".format((timer() - t_start)), end="")
-        print("", flush=True)
-
-        # saver interval
-        if global_step_value and (global_step_value % opts_train.saver_interval == 0):
-            if not os.path.exists(save_dir): os.mkdir(save_dir)
-            chkpt_save_path = save_path + "_" + str(global_step_value)
-            saver.save(sess, save_path)
-            logging.info("Checkpoint saved: %s" % chkpt_save_path)
-
-        # next step
-        global_step_value = global_step_value + 1
-
-    summary_writer.close()
-    # trainer.mainloop(
-    #     max_iter=opts_train.max_iter,
-    #     saver_interval=2000,
-    #     saver_var_list=saver_list,
-    #     train_ops=([train_op]),
-    #     display_str_ops=[('Loss', loss)],
-    #     display_interval=1,
-    #     runstats_interval=100,
-    #     trace_interval=100,
-    #     summary_int_ops=[(1, merged_summary)]
-    # )
-
-    # TODO Debug saving method
-    if not os.path.exists(save_dir):
-        os.mkdir(save_dir)
-    saver.save(sess, save_path)
-    logging.info("Model saved: %s" % save_path)
-
-
-def TRAIN(): pass
-
-
+def TRAIN(): pass # dummy function for PyCharm IDE
 if opts.train:
     logging.info('####################################################################')
     logging.info('#                            TRAINING                              #')
@@ -426,7 +331,7 @@ if opts.train:
                          n_contracting_blocks=opts.n_contracting_blocks,
                          n_start_features=opts.n_start_features,
                          norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
-                         aleatoric_samples=opts.aleatoric_samples, aleatoric_distr=opts.aleatoric_distr,
+                         aleatoric_sample_n=opts.aleatoric_sample_n,
                          copy_script_dir=args.code_copy_dir, debug=opts.debug,
                          opts_main=opts_train, opts_val=opts_val,
                          sess=sess, train_dir=args.train_dir
@@ -453,7 +358,7 @@ if opts.train:
 # -------
 def ___________________________TEST______________________________(): pass  # dummy function for PyCharm IDE
 
-
+# reset graph so that variables don't have to be reused (they will be restored from checkpoint)
 if opts.train: tf.reset_default_graph()
 
 
@@ -521,6 +426,9 @@ def test_debug(sess, net_test):
     # init variables if no checkpoint was loaded
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
+
+    #[global_step] = sess.run([net_test.global_step])
+    args.test_dir = filesys.find_or_create_test_dir(args.test_dir, args.train_dir)
 
     # ###########################################################################
     # RUN UNET
@@ -592,8 +500,6 @@ def test_metrics(sess, net_test):
     # init variables if no checkpoint was loaded
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
-
-
 
     # create test op and initialize associated variables
     test_op = net_test.test_op()
@@ -747,8 +653,7 @@ def test_sampling(sess, net_test):
         # ###########################################################################
 
 
-def TEST(): pass
-
+def TEST(): pass # dummy function for PyCharm IDE
 if opts.test:
     logging.info('####################################################################')
     logging.info('#                            TESTING                               #')

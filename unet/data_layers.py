@@ -173,7 +173,6 @@ def data_HDF5(data_path,
     '''
 
     with tf.variable_scope('DataSet_hdf5'):
-
         if prefetch_n is None: prefetch_n = batch_size * 2
         if prefetch_threads is None: prefetch_threads = 1
         logging.info("DataLayer HDF5 [%s] %s | prefetch %s w/ %s threads | source %s " %
@@ -183,7 +182,7 @@ def data_HDF5(data_path,
         data_gen = hdf5_generator(data_path,
                            augment=augment,
                            repeat=(is_training or augment), cache_full_file=True, shuffle=shuffle,
-                           resample_n=resample_n)
+                           resample_n=resample_n, name=name)
 
         sample_set = tf.data.Dataset.from_generator(
             data_gen,
@@ -245,7 +244,7 @@ def data_HDF5(data_path,
 class hdf5_generator:
     def __init__(self, file, keys=['data', 'label', 'weights'], augment=False,
                  repeat=False, cache_full_file=False, shuffle=False,
-                 resample_n=None):
+                 resample_n=None, name=None):
         """
         Create a HDF5 data generator. Is compatible to create a tf.dataset from it with
         sample_set = tf.data.Dataset.from_generator(
@@ -274,6 +273,7 @@ class hdf5_generator:
         self.shuffle = shuffle
         self.cache_full_file = cache_full_file
         self.resample_n = resample_n
+        self.name = name
 
         # parameters to adjust in code:
         self.debug = False  # for timing measurements (performance)
@@ -286,8 +286,8 @@ class hdf5_generator:
 
             # poke first dataset to get number of expected elements
             self.n_elements = f[h5_keys[0]].shape[self.element_axis]
-            logging.info('init HDF5 data_gen | Resample: [%s] / Caching: [%s] / Repeat: [%s] / | Reading %s elements (poked \'%s\' with %s) from %s' %
-                         (str(self.resample_n), str(self.cache_full_file),
+            logging.info('init HDF5 [%s] data_gen | Resample: [%s] / Caching: [%s] / Repeat: [%s] / | Reading %s elements (poked \'%s\' with %s) from %s' %
+                         ('' if self.name is None else self.name , str(self.resample_n), str(self.cache_full_file),
                           ('True' if self.repeat else str(self.repeat)),
                          str(self.n_elements), h5_keys[0], str(f[h5_keys[0]].shape), str(self.file)))
 
