@@ -7,5 +7,7 @@ output_scr
 unet/__pycache__
 util/__pycache__
 eval/data_net
+eval/data_all
+eval/data_run
 eval/std_evak.asv
 std_py.o14*
