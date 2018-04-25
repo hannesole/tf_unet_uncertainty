@@ -36,7 +36,30 @@ def sample_corrupt_logits(logits, sigma, sample_n):
     return tf.add(logits, noise)
 
 
-def aleatoric_loss(logits, label_one_hot, sigma_activations, n_samples, regularization = None):
+def aleatoric_entropy(logits, sigma_activations, n_samples):
+    """
+
+    :param logits:
+    :param sigma_activations:
+    :param n_samples:
+    :return: entropy, sampled_logits_sm
+    """
+    sigma = regularize_sigma(sigma_activations)
+
+    # create N=[aleatoric_sample_n] of corrupted logits
+    sampled_logits = sample_corrupt_logits(logits, sigma, n_samples) # [samples, batch_size, x, y, classes]
+    # mean of samples
+    sampled_logits_mean = tf.reduce_mean(sampled_logits, axis=0)
+    # squash logits vector with softmax, dim = class_dim
+    sampled_logits_sm = tf.nn.softmax(sampled_logits_mean, dim=-1)
+
+    # entropy of mean of sampled logits
+    # per pixel entropy = - SUM_C [ p_c * log(p_c) ] with classes C = [0, ..., C]
+    entropy = tf.multiply(tf.reduce_sum(tf.multiply(sampled_logits_sm, tf.log(sampled_logits_sm)), axis=-1), -1)
+    return entropy, sampled_logits_mean
+
+
+def aleatoric_cross_entropy(logits, label_one_hot, sigma_activations, n_samples, regularization = None):
     """
     Calculates aleatoric loss by sampling over corrupted logits.
 
@@ -49,7 +72,7 @@ def aleatoric_loss(logits, label_one_hot, sigma_activations, n_samples, regulari
 
     # create N=[aleatoric_sample_n] of corrupted logits
     sampled_logits = sample_corrupt_logits(logits, sigma, n_samples) # [samples, batch_size, x, y, classes]
-    # squash logits vector with softmax
+    # squash logits vector with softmax, dim = class_dim
     sampled_logits = tf.nn.softmax(sampled_logits, dim=-1)
 
     # mask the tensor with one_hot_labels (but keep dims)
@@ -61,11 +84,11 @@ def aleatoric_loss(logits, label_one_hot, sigma_activations, n_samples, regulari
     sampled_cross_entropy = tf.multiply( tf.log(sampled_logits_true_class + tf.constant(1.0e-4, dtype=tf.float32)), -1)
 
     # sum over and divide by number of pixels
-    # loss_per_pixel = tf.reduce_mean(sampled_cross_entropy, axis=0)
+    # loss_per_pixel = tf.reduce_mean(sampled_cross_entropy)
     # sum over and divide by number of samples
     # loss_per_pixel = tf.divide(tf.reduce_sum(sampled_cross_entropy, axis=0), n_samples)
     # do both in one step:
-    loss_aletaoric = tf.reduce_mean(sampled_cross_entropy)
+    aleatoric_CE_mean = tf.reduce_mean(sampled_cross_entropy, axis=0)
 
     if regularization is not None:
         if regularization == 'mean_square':
@@ -74,15 +97,15 @@ def aleatoric_loss(logits, label_one_hot, sigma_activations, n_samples, regulari
             regularization_term = tf.square(sigma)
         else:
             regularization_term = 0 # no default
-        loss_aletaoric = loss_aletaoric + regularization_term
 
-    return loss_aletaoric, sigma, sampled_logits
+            aleatoric_CE_mean = aleatoric_CE_mean + regularization_term
+
+    return aleatoric_CE_mean, sigma, sampled_logits
 
 
 def gaussian_entropy(sigma):
     """
-    Entropy of Gaussian is the aleatoric uncertainty measure
-    if a Gaussian distribution was used for sampling
+    Entropy of Gaussian
     Formula from: https://en.wikipedia.org/wiki/Normal_distribution
     1/2 * log(2*pi*e*sigma_activations**2)
     """

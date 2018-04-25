@@ -19,6 +19,7 @@ import matplotlib;
 matplotlib.use('Agg')  # set this before any other module makes use of matplotlib (and sets it)
 
 import numpy as np
+import scipy.io
 from timeit import default_timer as timer
 from collections import OrderedDict
 
@@ -40,6 +41,7 @@ from util import tf_helpers
 # from unet import model
 from unet import model_dev as model
 from unet import data_layers
+from unet import uncertainty
 from util.tfutils import SimpleTrainer
 
 # ######################################################################################################################
@@ -67,8 +69,9 @@ parser.add_argument('--mode', '-m', metavar='mode', required=False,
                          "e.g. ('traintest' or 'testtrain' or 'debugtrain').",
                     default=None)
 parser.add_argument('--config', '-c', metavar='config', required=False,
-                    help="The location of the config file. Default is config.ini in script directory.",
-                    default='config.ini')
+                    help="The location of the config file. Defaults to config.ini in train_dir (if existent)" +
+                         " or otherwise config.ini in this script's directory.",
+                    default=None)
 parser.add_argument('--checkpoint', '-ckp', metavar='checkpoint', required=False,
                     help='Provide a model checkpoint file, otherwise searching for last one in train_dir/checkpoints.' +
                          'For training: Trains from scratch if no checkpoint is found.' +
@@ -185,7 +188,7 @@ class config_extended(config_util.config_decorator):
 
 # initialize options from config file
 config = configparser.ConfigParser()
-config.read(filesys.find_or_create_config_path(args.train_dir))
+config.read(filesys.find_or_create_config_path(args.train_dir, config_path=args.config))
 
 opts = config_extended(config, default='DEFAULT')
 opts_test = config_util.config_decorator(config['TEST'])
@@ -322,6 +325,11 @@ if opts.train:
     logging.info('####################################################################')
     logging.info('#                            TRAINING                              #')
     logging.info('####################################################################')
+
+    # set checkpoint path from opts if set in there not given per command line (CL) argument
+    if args.checkpoint is None and opts_train.global_step is not None:
+        args.checkpoint = args.train_dir + '/checkpoints/snapshot-' + opts_train.global_step
+
     # create session (tfdbg works only in command line)
     with tf_debug.LocalCLIDebugWrapperSession(tf.Session(config=opts.tf_config)) if opts.tfdbg \
             else tf.Session(config=opts.tf_config) as sess:
@@ -427,62 +435,225 @@ def test_debug(sess, net_test):
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
 
-    #[global_step] = sess.run([net_test.global_step])
-    args.test_dir = filesys.find_or_create_test_dir(args.test_dir, args.train_dir)
-
+    # add softmax op
+    net_batch_softmax = tf.nn.softmax(net_test.output_mask)
+    # add uncertainty op if supported (network trained with aleatoric loss)
+    if opts_test.aleatoric_sample_n is not None and opts_test.aleatoric_sample_n > 0:
+        net_batch_uncertainty = uncertainty.aleatoric_entropy(net_test.output_mask,
+                                                              net_test.sigma_activations,
+                                                              opts_test.aleatoric_sample_n)
+    else:
+        net_batch_uncertainty = \
+            tf.constant(0, shape = [opts_test.batch_size, opts_test.shape_label[0], opts_test.shape_label[1]])
     # ###########################################################################
     # RUN UNET
     # ###########################################################################
     logging.debug("predicting, sampling %s times, batch_size %s" % (opts_test.n_samples, opts_test.batch_size))
 
     for b in range(opts_test.n_samples):
-        net_batch_softmax = tf.nn.softmax(net_test.output_mask)
         try:
             logging.debug("run ...")
-            batch_img, batch_label, batch_softmax, batch_prediction = sess.run(
-                [net_test.batch_img, net_test.batch_label, net_batch_softmax, net_test.prediction])
+            batch_img, batch_label, batch_softmax, batch_prediction, batch_uncertainty \
+                = sess.run(  [net_test.batch_img, net_test.batch_label,
+                              net_batch_softmax, net_test.prediction, net_batch_uncertainty ])
         except tf.errors.OutOfRangeError:
             break
         logging.debug("... success")
 
-        # out_img = np.squeeze(img_util.to_rgb(batch_activations))
-        # img_util.save_image(out_img, "%s/img_%s_pred.png" % (args.test_dir, b))
-
+        # reshape so that batch_size is merged into x dimension (images are concatenated along x dim)
+        #logging.debug('  uncertainty: %s %s' % (str(batch_uncertainty.shape), str(batch_uncertainty.dtype)))
+        batch_uncertainty = batch_uncertainty[..., np.newaxis]
         r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
         r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
-        r_batch_softmax = np.reshape(batch_softmax,
-                                         [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
+        r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
         r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+        r_batch_uncertainty = np.reshape(batch_uncertainty, [-1, batch_uncertainty.shape[2], batch_uncertainty.shape[3]])
 
         import scipy.io
         # matlab arrays
-        scipy.io.savemat("%s/tile_%s.mat" % (args.test_dir, b), mdict={
+        scipy.io.savemat("%s/tile_%02d.mat" % (args.test_dir, b), mdict={
             'tile' : r_batch_img,
             'label' : r_batch_label,
             'pred' : r_batch_prediction,
-            'softmax' : r_batch_softmax
+            'softmax' : r_batch_softmax,
+            'uncertainty' : r_batch_uncertainty
         } )
-
 
         logging.debug('writing tile-file: %s/tile_%s.mat' % (args.test_dir, b))
         logging.debug('  softmax_activations: %s %s' % (str(r_batch_softmax.shape), str(r_batch_softmax.dtype)))
         logging.debug('  prediction: %s %s' % (str(r_batch_prediction.shape), str(r_batch_prediction.dtype)))
         logging.debug('  img: %s %s' % (str(r_batch_img.shape), str(r_batch_img.dtype)))
         logging.debug('  label: %s %s' % (str(r_batch_label.shape), str(r_batch_label.dtype)))
+        logging.debug('  uncertainty: %s %s' % (str(r_batch_uncertainty.shape), str(r_batch_uncertainty.dtype)))
 
         # summary
         out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
                                   np.squeeze(img_util.to_rgb(r_batch_label)),
-                                  np.squeeze(img_util.to_rgb(r_batch_softmax[..., 0, np.newaxis], normalize=True)),
+                                  #np.squeeze(img_util.to_rgb(r_batch_softmax[..., 0, np.newaxis], normalize=True)),
                                   np.squeeze(img_util.to_rgb(r_batch_softmax[..., 1, np.newaxis], normalize=True)),
-                                  np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis]))
+                                  np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis])),
+                                  np.squeeze(img_util.to_rgb(r_batch_uncertainty[..., np.newaxis]))
                                   ), axis=1)
-
-        img_util.save_image(out_img, "%s/tile_%s_summary.png" % (args.test_dir, b))
+        img_util.save_image(out_img, "%s/tile_%02d_summary.png" % (args.test_dir, b))
 
         # ###########################################################################
         # CLOSE NET
         # ###########################################################################
+
+
+# test with sampling for uncertainty (only makes sense when resample_n != None and keep_prob != 1.0
+def test_debug_sampling(sess, net_test):
+    logging.info('#-----------------------------------------------#')
+    logging.info('#        Starting Testing with sampling         #')
+    logging.info('#-----------------------------------------------#')
+
+    # load model for testing (if None provided, searches in train_dir, if not found doesn't load)
+    trainer = SimpleTrainer(session=sess, train_dir=args.train_dir)
+    chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
+    args.test_dir = filesys.find_or_create_test_dir(args.test_dir, args.train_dir)
+
+    # add uncertainty op if supported (network trained with aleatoric loss)
+    if opts_test.aleatoric_sample_n is not None and opts_test.aleatoric_sample_n > 0:
+        # get uncertainty (entropy) and sampled, softmaxed output mask
+        net_batch_uncertainty, net_batch_softmax = uncertainty.aleatoric_entropy(net_test.output_mask,
+                                                              net_test.sigma_activations,
+                                                              opts_test.aleatoric_sample_n)
+        # create prediction from sampled, softmaxed output mask
+        net_batch_prediction = tf.argmax(tf.nn.softmax(net_batch_softmax), axis=-1, output_type=tf.int32)
+    else:
+        # add softmax op, default net prediction and dummy uncertainty
+        net_batch_softmax = tf.nn.softmax(net_test.output_mask)
+        net_batch_prediction = net_test.prediction
+        # for default net w/o aleatoric loss no uncertainty is defined. Can be generated with dropout (resample_n)
+        net_batch_uncertainty = tf.constant(0, shape=list(net_batch_softmax.shape)[0:3])
+
+    # ###########################################################################
+    # RUN UNET
+    # ###########################################################################
+    logging.debug("predicting: n_samples %s, resample_n %s, batch_size %s" %
+                  (str(opts_test.n_samples), str(opts_test.resample_n), str(opts_test.batch_size)))
+
+    # create folder to store samples in
+    if opts_test.resample_n is not None:
+        sample_dir = args.test_dir + os.sep + 'samples'
+        os.mkdir(sample_dir)
+
+    for b in range(opts_test.n_samples):
+        # GENERATE RESULTS
+        # ----------------
+        try:
+            # standard run (or first run if resampling, to get batch_img and batch_label once)
+            logging.debug("run ...")
+            batch_img, batch_label, batch_softmax, batch_prediction, batch_uncertainty \
+                = sess.run([net_test.batch_img, net_test.batch_label,
+                            net_batch_softmax, net_batch_prediction, net_batch_uncertainty])
+
+            # if resampling, create store to sample into
+            if opts_test.resample_n is not None:
+                r_batch_pred = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+                # init prediction_sample store
+                prediction_samples = np.zeros([opts_test.resample_n] + list(r_batch_pred.shape), dtype=np.uint8)
+                # store prediction for averaging
+                prediction_samples[0, ...] = r_batch_pred
+                if opts_test.aleatoric_sample_n is not None:
+                    r_batch_uncertainty = np.reshape(batch_uncertainty, [-1, batch_uncertainty.shape[2]])
+                    # init prediction_sample store
+                    uncertainty_samples = np.zeros([opts_test.aleatoric_sample_n] + list(r_batch_uncertainty.shape), dtype=np.float32)
+                    # store uncertainty for averaging (comes as [batch_size x y])
+                    uncertainty_samples[0, ...] = r_batch_uncertainty
+
+                # start sampling (-1 because one run was already done)
+                for s in range(1,opts_test.resample_n):
+                    batch_softmax, batch_prediction, batch_uncertainty \
+                        = sess.run([net_batch_softmax, net_test.prediction, net_batch_uncertainty])
+
+                    # store prediction
+                    r_batch_pred = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+                    prediction_samples[s, ...] = r_batch_pred
+                    # save sample images to sample folder
+                    out_sample = img_util.to_rgb(prediction_samples[s, ...])
+                    img_util.save_image(out_sample, "%s/sample_%s_%s_pred.png" % (sample_dir, b, s))
+
+                    if opts_test.aleatoric_sample_n is not None:
+                        # store uncertainty
+                        r_batch_uncertainty = np.reshape(batch_uncertainty, [-1, batch_uncertainty.shape[2]])
+                        uncertainty_samples[s, ...] = r_batch_uncertainty
+                        # save sample images to sample folder
+                        out_sample = img_util.to_rgb(uncertainty_samples[s, ...])
+                        img_util.save_image(out_sample, "%s/sample_%s_%s_unc.png" % (sample_dir, b, s))
+
+        except tf.errors.OutOfRangeError:
+            break
+
+        # PROCESS RESULTS
+        # ---------------
+        # reshape so that batch_size is merged into x dimension (images are concatenated along x dim)
+        r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
+        r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
+        r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
+
+        # if resampling, create pred and uncertainty from samples
+        if opts_test.resample_n is not None:
+            # create mean of samples and save as r_batch_prediction
+            logging.info('resampled pred (%s), averaging for pred' % (str(opts_test.resample_n)))
+            r_batch_prediction = np.mean(prediction_samples, axis=0)
+            #std_deviation = np.std(prediction_samples, axis=0)
+
+            if opts_test.aleatoric_sample_n is not None:
+                #uncertainty_samples = uncertainty_samples[..., np.newaxis]
+                # create mean of samples and save as r_batch_uncertainty
+                logging.info('calculating combined entropy from %s aleatoric samples' % (str(opts_test.aleatoric_sample_n)))
+                # create
+                r_batch_uncertainty = - np.sum(uncertainty_samples * np.nan_to_num(np.log(uncertainty_samples)), axis=0)
+                #r_batch_uncertainty = r_batch_uncertainty
+                r_batch_uncertainty /= np.max(r_batch_uncertainty)
+            else:
+                logging.info('calculating epistemic entropy from %s pred samples' % (str(opts_test.resample_n)))
+                # compute epistemic uncertainty and overwrite (empty) network output uncertainty
+                #TODO entropy with softmax? but which class?
+                r_batch_uncertainty = calc.entropy_bin_array(prediction_samples)
+        else:
+            r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+            # append axis for easier processing in MATLAB (same rank as softmax)
+            batch_uncertainty = batch_uncertainty[..., np.newaxis]
+            r_batch_uncertainty = np.reshape(batch_uncertainty,
+                                             [-1, batch_uncertainty.shape[2], batch_uncertainty.shape[3]])
+
+        # WRITE RESULTS
+        # -------------
+        logging.debug('writing tile-file: %s/tile_%s.mat' % (args.test_dir, b))
+        logging.debug('  softmax_activations: %s %s' % (str(r_batch_softmax.shape), str(r_batch_softmax.dtype)))
+        logging.debug('  prediction: %s %s' % (str(r_batch_prediction.shape), str(r_batch_prediction.dtype)))
+        logging.debug('  img: %s %s' % (str(r_batch_img.shape), str(r_batch_img.dtype)))
+        logging.debug('  label: %s %s' % (str(r_batch_label.shape), str(r_batch_label.dtype)))
+        logging.debug('  uncertainty: %s %s' % (str(r_batch_uncertainty.shape), str(r_batch_uncertainty.dtype)))
+
+        # write matlab arrays
+        scipy.io.savemat("%s/tile_%02d.mat" % (args.test_dir, b), mdict={
+            'tile' : r_batch_img,
+            'label' : r_batch_label,
+            'pred' : r_batch_prediction,
+            'softmax' : r_batch_softmax,
+            'uncertainty' : r_batch_uncertainty
+        } )
+
+        # summary
+        out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
+                                  np.squeeze(img_util.to_rgb(r_batch_label)),
+                                  #np.squeeze(img_util.to_rgb(r_batch_softmax[..., 0, np.newaxis], normalize=True)),
+                                  np.squeeze(img_util.to_rgb(r_batch_softmax[..., 1, np.newaxis], normalize=True)),
+                                  np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis])),
+                                  np.squeeze(img_util.to_rgb(r_batch_uncertainty[..., np.newaxis]))
+                                  ), axis=1)
+        img_util.save_image(out_img, "%s/tile_%02d_summary.png" % (args.test_dir, b))
+
+        # ###########################################################################
+        # CLOSE NET
+        # ###########################################################################
+
+
+
+
 
 
 
@@ -659,16 +830,21 @@ if opts.test:
     logging.info('#                            TESTING                               #')
     logging.info('####################################################################')
 
+    # set checkpoint path from opts if set in there not given per command line (CL) argument
+    if args.checkpoint is None and opts_test.global_step is not None:
+        args.checkpoint = args.train_dir + '/checkpoints/snapshot-' + str(opts_test.global_step)
 
+    args.test_dir = filesys.find_or_create_test_dir(args.test_dir, args.train_dir, opts=opts_test)
 
     with tf_debug.LocalCLIDebugWrapperSession(tf.Session(config=opts.tf_config)) if opts.tfdbg \
             else tf.Session(config=opts.tf_config) as sess:
 
         # create network graph with data layer
         net = model.UNet(is_training=False, keep_prob=opts_test.keep_prob,
-                         n_contracting_blocks=opts.n_contracting_blocks,
-                         n_start_features=opts.n_start_features,
-                         norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
+                         n_contracting_blocks=opts_test.n_contracting_blocks,
+                         n_start_features=opts_test.n_start_features,
+                         norm_fn=opts_test.norm_fn, normalizer_params=opts_test.norm_fn_params,
+                         aleatoric_sample_n=opts_test.aleatoric_sample_n,
                          copy_script_dir=args.code_copy_dir, debug=opts.debug,
                          opts_main=opts_test,
                          sess=sess, train_dir=args.train_dir)
@@ -676,7 +852,7 @@ if opts.test:
         # for hdf5 and feed_dict layers no coordinators need to be initialized
         # different when using tfrecords
         if opts.debug:
-            test_debug(sess, net)
+            test_debug_sampling(sess, net)
         else:
             if opts_test.resample_n is not None:
                 test_sampling(sess, net)
@@ -698,10 +874,10 @@ if opts.test:
 # DEBUG
 # --------
 def __________________________DEBUG_____________________________(): pass  # dummy function for PyCharm IDE
-
+# reset graph so that variables don't have to be reused (they will be restored from checkpoint)
+if opts.train: tf.reset_default_graph()
 
 opts.batch_size = 5
-
 
 # core code for training
 def DEBUG_core(sess):
@@ -709,14 +885,42 @@ def DEBUG_core(sess):
     logging.info('#                Start Debugging                #')
     logging.info('#-----------------------------------------------#')
 
-    batch_img, batch_label, batch_weights = data_layers.data_HDF5(opts.dset_train,
-                                                                  opts.shape_img, opts.shape_label, opts.shape_weights,
+    args.test_dir = filesys.find_or_create_test_dir(args.test_dir, args.train_dir, opts=opts_test)
+
+    batch_img, batch_label, batch_weights = data_layers.data_HDF5(opts_train.dataset,
+                                                                  opts_train.shape_img, opts_train.shape_label, opts_train.shape_weights,
                                                                   shuffle=False, batch_size=opts.batch_size,
                                                                   prefetch_threads=12, prefetch_n=40,
                                                                   resample_n=40,
                                                                   augment=True)
 
-    for bb in range(opts.n_samples):
+    resize = opts_train.resize
+    if opts_train.resize is not None:
+        if opts_train.resize_method == "scale":
+            batch_img = tf.image.resize_images(batch_img, resize)
+            batch_label = tf.image.resize_images(batch_label, resize)
+            batch_label = tf.cast(batch_label, tf.uint8)  # is changed by resize
+            batch_weights = tf.image.resize_images(batch_weights, resize)
+        elif opts_train.resize_method == "center_crop":
+            batch_img = tf.map_fn(lambda img: tf.image.central_crop(img, 0.5),
+                                       batch_img, parallel_iterations=8, name="center_crop")
+            batch_label = tf.map_fn(lambda img: tf.image.central_crop(img, 0.5),
+                                         batch_label, parallel_iterations=8, name="center_crop")
+            batch_weights = tf.map_fn(lambda img: tf.image.central_crop(img, 0.5),
+                                           batch_weights, parallel_iterations=8, name="center_crop")
+        else:
+            random_seed = 42  # tf.random_uniform(1, minval=0, maxval=65536, dtype=tf.int16)
+            batch_img = tf.random_crop(batch_img,
+                                            [batch_img.get_shape().as_list()[0], resize[0], resize[1],
+                                             batch_img.get_shape().as_list()[3]], seed=random_seed)
+            batch_label = tf.random_crop(batch_label,
+                                              [batch_label.get_shape().as_list()[0], resize[0], resize[1],
+                                               batch_label.get_shape().as_list()[3]], seed=random_seed)
+            batch_weights = tf.random_crop(batch_weights,
+                                                [batch_weights.get_shape().as_list()[0], resize[0], resize[1],
+                                                 batch_weights.get_shape().as_list()[3]], seed=random_seed)
+
+    for bb in range(opts_test.n_samples):
         r_batch_img = []
         for b in range(8):
             start = timer()
@@ -730,36 +934,6 @@ def DEBUG_core(sess):
         print("stitching and creating file")
         out_img = np.concatenate([img_util.to_rgb(batch) for batch in r_batch_img], axis=1)
         img_util.save_image(out_img, "%s/img_aug_%s.jpg" % (args.test_dir, str(bb)))
-
-    batch_img, batch_label, batch_weights = data_layers.data_HDF5(opts.dset_train,
-                                                                  opts.shape_img, opts.shape_label, opts.shape_weights,
-                                                                  shuffle=True, batch_size=opts.batch_size,
-                                                                  prefetch_threads=12, prefetch_n=10,
-                                                                  resample_n=None,
-                                                                  augment=True)
-
-    for b in range(50):
-        start = timer()
-        e_batch_img, e_batch_label, e_batch_weights = sess.run([batch_img, batch_label, batch_weights])
-        end = timer()
-
-        print("got batch in %.4f s : img %s %s, label %s %s, weights %s %s" % ((end - start),
-                                                                               str(e_batch_img.shape),
-                                                                               str(e_batch_img.dtype),
-                                                                               str(e_batch_label.shape),
-                                                                               str(e_batch_label.dtype),
-                                                                               str(e_batch_weights.shape),
-                                                                               str(e_batch_weights.dtype)))
-
-        r_batch_img = np.reshape(e_batch_img, [-1, e_batch_img.shape[2], e_batch_img.shape[3]])
-        r_batch_label = np.reshape(e_batch_label, [-1, e_batch_label.shape[2], e_batch_label.shape[3]])
-        r_batch_weights = np.reshape(e_batch_weights, [-1, e_batch_weights.shape[2], e_batch_weights.shape[3]])
-
-        out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
-                                  np.squeeze(img_util.to_rgb(r_batch_label)),
-                                  np.squeeze(img_util.to_rgb(r_batch_weights, normalize=True))), axis=1)
-
-        img_util.save_image(out_img, "%s/img_%s.png" % (args.test_dir, str(b)))
 
 
 # TODO: Remove debugging code

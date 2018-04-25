@@ -6,3 +6,6 @@ output
 output_scr
 unet/__pycache__
 util/__pycache__
+eval/data_net
+eval/std_evak.asv
+std_py.o14*

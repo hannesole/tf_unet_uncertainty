@@ -192,9 +192,9 @@ class UNet():
                 softmaxCE_w = tf.multiply(softmaxCE, self.batch_weights)
 
                 loss_softmaxCE_w = tf.reduce_mean(softmaxCE_w)
-                tf.summary.scalar('loss/weighted_softmax_cross_entropy', loss_softmaxCE_w)
+                tf.summary.scalar('weighted_softmax_cross_entropy', loss_softmaxCE_w)
                 loss_softmaxCE = tf.reduce_mean(softmaxCE)
-                tf.summary.scalar('loss/softmax_cross_entropy', loss_softmaxCE)
+                tf.summary.scalar('softmax_cross_entropy', loss_softmaxCE)
 
 
                 # set loss used for optimization
@@ -203,13 +203,20 @@ class UNet():
                 else:
                 # UNCERTAINTY LOSS
                 # -----------------
-                    loss_aletaoric, sigma, sampled_logits = \
-                        uncertainty.aleatoric_loss(self.output_mask, self.batch_label_one_hot,
+                    aleatoric_CE_mean, sigma, sampled_logits = \
+                        uncertainty.aleatoric_cross_entropy(self.output_mask, self.batch_label_one_hot,
                                                    self.sigma_activations, self.aleatoric_sample_n,
                                                    regularization=opts.aleatoric_reg)
 
-                    self.loss = loss_aletaoric
-                    tf.summary.scalar('loss/aleatoric_loss', self.loss)
+                    loss_aletaoric = tf.reduce_mean(aleatoric_CE_mean)
+                    tf.summary.scalar('aleatoric_loss', loss_aletaoric)
+
+                    # weighted loss
+                    aletaoric_CE_mean_w = tf.multiply(aleatoric_CE_mean, self.batch_weights)
+                    loss_aletaoric_w = tf.reduce_mean(aletaoric_CE_mean_w)
+                    tf.summary.scalar('weighted_aleatoric_loss', loss_aletaoric_w)
+
+                    self.loss = loss_aletaoric_w
                 # -----------------
 
             # IMAGE SUMMARY
@@ -562,12 +569,14 @@ class UNet():
         ## OUTPUT LAYER(S)
         with tf.variable_scope('UNet/output_mask'):
             # self.output_mask = reduce feature space (map features to n_classes, essentially a classifier)
+            logging.info('AddLayer: UNet/output_mask for %s classes' % (str(n_class)))
             output_mask = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
             # add sigma_activations for aleatoric loss (learned uncertainty map)
             if aleatoric_samples is not None:
                 # per class sigma (per class uncertainty)
                 #sigma_activations = tc.layers.conv2d(output_prev_layer, n_class, [1, 1], activation_fn=None)
                 # per pixel uncertainty
+                logging.info('AddLayer: UNet/output_sigma for aleatoric uncertainty')
                 sigma_activations = tc.layers.conv2d(output_prev_layer, 1, [1, 1], activation_fn=None)
             else:
                 sigma_activations = None

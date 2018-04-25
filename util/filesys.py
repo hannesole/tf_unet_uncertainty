@@ -2,7 +2,7 @@ import os
 import shutil
 import logging
 import time
-
+import config_util
 
 def find_or_create_train_dir(name, output_dir, train_dir, continue_training=False):
     # create train directory train_dir if it doesn't exist
@@ -41,14 +41,15 @@ def find_or_create_train_dir(name, output_dir, train_dir, continue_training=Fals
             return train_dir, continue_training
 
 
-def find_or_create_test_dir(test_dir, train_dir, global_step=None):
-    # create test_dir if it doesn't exist. Use either default naming (optionally adding global_step)
+def find_or_create_test_dir(test_dir, train_dir, opts=None, global_step=None):
+    # create test_dir if it doesn't exist. Use either default naming (optionally adding config string)
     # or a given test_dir.
     if test_dir is None:
         # create test_dir with current time if none is specified
-        test_dir = train_dir + os.sep + "prediction" + \
+        test_dir = train_dir + os.sep + "pred" + \
                    ('' if global_step is None else ('_%s' % str(global_step))) + \
-                   time.strftime("_%Y-%m-%d_%H%M")
+                   time.strftime("_%m-%d_%H%M") +\
+                   ('' if opts is None else '_' + config_util.keystr_from_opts(opts))
         # avoid overwriting (by appendin _X to name if already exists)
         if os.path.exists(test_dir):
             test_dir = test_dir + '_'
@@ -96,7 +97,8 @@ def find_or_create_code_copy_dir(file_src, code_copy_dir, train_dir):
         return None
 
 
-def find_or_create_config_path(base_dir, config_name = 'config.ini', config_template = 'config.ini'):
+def find_or_create_config_path(base_dir, config_name = 'config.ini', config_template = 'config.ini',
+                               config_path = None):
     """
         This checks first for a config.ini in base_dir.
         If none is found, config.ini is copied to base_dir.
@@ -109,7 +111,8 @@ def find_or_create_config_path(base_dir, config_name = 'config.ini', config_temp
     (default: config.ini at script location)
     :return:
     """
-    config_path = base_dir + os.sep + config_name
+    if config_path is None:
+        config_path = base_dir + os.sep + config_name
 
     if os.path.exists(config_path):
         logging.info('Using config found at %s' % (config_path))

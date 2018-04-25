@@ -14,15 +14,17 @@ import random
 
 from util import img_util
 
-def augment(img, label, weights, p=0.5):
+def augment(img, label, weights, p=0.75):
     '''
+    Uses imaug to apply deformation and value augmentation
+    to img, labels and weights.
 
     :param img:
     :param label:
     :param weights:
+    :param p: base probability
     :return:
     '''
-    p = 0.75
 
     # preserve dtypes when augmenting!
     original_dtypes = [img.dtype, label.dtype, weights.dtype ]
@@ -51,14 +53,14 @@ def augment(img, label, weights, p=0.5):
 
             sometimes(iaa.OneOf([ # either some affine transformations, a piecewise affine or a perspective transform
                 iaa.Affine( # might want to split out single transforms with iaa.SomeOf((0, 3), [])
-                            scale={"x": (0.8, 1.2), "y": (0.8, 1.2)}, # scale images to 80-120% of their size, individually per axi
+                            scale={"x": (0.7, 1.3), "y": (0.7, 1.3)}, # scale images to 80-120% of their size, individually per axi
                             rotate=(0,360), # rotate random degrees
-                            shear=(-16, 16), # shear by -16 to +16 degrees
+                            shear=(-21, 21), # shear by -16 to +16 degrees
                             order=[0], # use nearest neighbour or bilinear interpolation (fast)
                             cval=0, # if mode is constant, use 0 (black) as constant value (for padding)
                             mode="reflect" # for new pixels use vector mirrored on the first and last values of the vector along each axis
                         ),
-                sometimes(iaa.PiecewiseAffine(scale=(0.01, 0.04)))  # sometimes move parts of the image around
+                sometimes(iaa.PiecewiseAffine(scale=(0.01, 0.05)))  # sometimes move parts of the image around
                 #sometimes(iaa.PerspectiveTransform(scale=(0.02, 0.08)))    # might change dtype to uint8!
             ]))
         ],

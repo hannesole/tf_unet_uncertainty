@@ -9,6 +9,7 @@
 from json import loads as parse_list
 from collections import OrderedDict
 import configparser
+import logging
 
 def opts_to_str(opts, width = 96):
     '''Prints the opts class as box with all settings'''
@@ -40,7 +41,14 @@ def parse_implicitly(s):
 
 def parse_implicitly_extended(config_prox, attr):
     """" This returns a class for norm_fn and a dict of options for norm_fn_params """
-    attr_val = parse_implicitly(config_prox[attr])
+
+    # Wrapping in a try-catch phrase allows referencing options that are neither defined
+    # in config.ini nor the class by returning None for those.
+    try:
+        attr_val = parse_implicitly(config_prox[attr])
+    except KeyError:
+        logging.warning('Key %s not in config! Defaults to None.' % attr)
+        return None
 
     if attr == 'norm_fn':
         # get actual class from string
@@ -97,10 +105,6 @@ class config_decorator:
         :return: value of attr in config_proxy with parsed data type
         """
         # Wrapping in a try-catch phrase:
-        # try:
-        #     return self.parse_implicitly(self.config_prox[attr])
-        # except KeyError:
-        #     return None
         # ... would allow referencing options that are neither defined in config.ini nor the class
         # by returning None for those.
 
@@ -113,6 +117,7 @@ class config_decorator:
         #     return 12
         # elif attr == 'prefetch_n':
         #     return 32
+
 
         return parse_implicitly_extended(self.config_prox, attr)
 
@@ -139,6 +144,9 @@ class config_decorator:
 
 
 def keystr_from_config(conf_file_path = 'config.ini', section = 'DEFAULT'):
+    if conf_file_path is None:
+        conf_file_path = 'config.ini'
+
     # create config_reader (to allow config.attr access)
     config = configparser.ConfigParser()
     config.read(conf_file_path)
@@ -155,6 +163,30 @@ def keystr_from_config(conf_file_path = 'config.ini', section = 'DEFAULT'):
                                      opts.aleatoric_distr if opts.aleatoric_distr is not None else '',
                                     ('_'+opts.aleatoric_reg) if opts.aleatoric_reg is not None else '' ))
                     if opts.aleatoric_sample_n is not None else '') + \
-                   (('_%s' % opts.train_name) if opts.train_name is not None else '')
+                   (('_%s' % opts.train_name) if (section=='TRAIN' and opts.train_name is not None) else '')
 
+    # remove dots from floats
+    return build_string.replace('.', '')
+
+
+def keystr_from_opts(opts):
+    # create string from config attributes
+    build_string = (('bn%1.3f_' % (opts.norm_fn_param_decay)).replace('0', '') if opts.norm_fn is not None else '') + \
+                   ('bs%i' % opts.batch_size if opts.batch_size > 1 else '') + \
+                   ('s' if opts.shuffle else '') + \
+                   ('A' if opts.augment else '') + \
+                   (('Dp%1.2f' % (1 - opts.keep_prob)) if opts.keep_prob < 1.0 else '') + \
+                   (('_Re%i' % opts.resample_n) if opts.resample_n is not None else '') + \
+                   (('_AL%i%s%s' % (opts.aleatoric_sample_n,
+                                     opts.aleatoric_distr if opts.aleatoric_distr is not None else '',
+                                    ('_'+opts.aleatoric_reg) if opts.aleatoric_reg is not None else '' ))
+                    if opts.aleatoric_sample_n is not None else '')
+
+    try:
+        if opts.global_step is not None:
+            build_string = build_string + '_' + str(opts.global_step)
+    except:
+        pass
+
+    # remove dots from floats
     return build_string.replace('.', '')

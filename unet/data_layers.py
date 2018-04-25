@@ -181,7 +181,8 @@ def data_HDF5(data_path,
 
         data_gen = hdf5_generator(data_path,
                            augment=augment,
-                           repeat=(is_training or augment), cache_full_file=True, shuffle=shuffle,
+                           repeat=(is_training or augment),
+                           cache_full_file=False, shuffle=shuffle,
                            resample_n=resample_n, name=name)
 
         sample_set = tf.data.Dataset.from_generator(
