@@ -1,4 +1,5 @@
 import tensorflow as tf
+import numpy as np
 import math
 
 def softmax_stable(logits, axis):
@@ -103,6 +104,7 @@ def aleatoric_cross_entropy(logits, label_one_hot, sigma_activations, n_samples,
     return aleatoric_CE_mean, sigma, sampled_logits
 
 
+
 def gaussian_entropy(sigma):
     """
     Entropy of Gaussian
@@ -110,3 +112,20 @@ def gaussian_entropy(sigma):
     1/2 * log(2*pi*e*sigma_activations**2)
     """
     return tf.divide(tf.multiply(tf.square(sigma), (2*math.pi*math.e)), 2)
+
+
+def epistemic_entropy(sampled_softmax):
+    """
+
+    :param sampled_softmax_mean: [n_samples, x, y, n_classes]
+    :return: entropy, sampled_softmax_mean, prediction
+    """
+    # mean of samples
+    sampled_softmax_mean = np.mean(sampled_softmax, axis=0)
+    # squash softmax mean with argmax to get segmentation, dim = class_dim
+    prediction = np.argmax(sampled_softmax_mean, axis=-1)
+
+    # entropy of mean of sampled softmaxed logits
+    # per pixel entropy = - SUM_C [ p_c * log(p_c) ] with classes C = [0, ..., C]
+    entropy = - np.sum(sampled_softmax_mean * np.nan_to_num(np.log(sampled_softmax_mean)), axis=-1)
+    return entropy, sampled_softmax_mean, prediction

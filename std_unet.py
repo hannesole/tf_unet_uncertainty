@@ -197,8 +197,11 @@ try: opts_val = config_util.config_decorator(config['VAL'])
 except KeyError: opts_val = None
 
 # output opts to console
-print(config_util.opts_to_str(opts))
-
+print(config_util.opts_to_str(opts, 'DEFAULT'))
+if opts.train:
+    print(config_util.opts_to_str(opts_train, 'TRAIN'))
+if opts.test:
+    print(config_util.opts_to_str(opts_train, 'TEST'))
 # ######################################################################################################################
 # TRAINING
 # --------
@@ -368,60 +371,6 @@ def ___________________________TEST______________________________(): pass  # dum
 
 # reset graph so that variables don't have to be reused (they will be restored from checkpoint)
 if opts.train: tf.reset_default_graph()
-
-
-# core code for testing
-def test_core(sess, net_test):
-    logging.info('#-----------------------------------------------#')
-    logging.info('#               Starting Testing                #')
-    logging.info('#-----------------------------------------------#')
-
-    # load model for testing (if None provided, searches in train_dir, if not found doesn't load)
-    trainer = SimpleTrainer(session=sess, train_dir=args.train_dir)
-    chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
-    # init variables if no checkpoint was loaded
-    if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
-    logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
-
-    # ###########################################################################
-    # RUN UNET
-    # ###########################################################################
-    logging.debug("predicting, sampling %s times, batch_size %s" % (opts_test.n_samples, opts_test.batch_size))
-
-    for b in range(opts_test.n_samples):
-        try:
-            batch_img, batch_label, batch_activations, batch_prediction = sess.run(
-                [net_test.batch_img, net_test.batch_label, net_test.output_mask, net_test.prediction])
-        except tf.errors.OutOfRangeError:
-            break
-
-        # out_img = np.squeeze(img_util.to_rgb(batch_activations))
-        # img_util.save_image(out_img, "%s/img_%s_pred.png" % (args.test_dir, b))
-
-        logging.debug('batch_activations: %s %s' % (str(batch_activations.shape), str(batch_activations.dtype)))
-        logging.debug('batch_prediction: %s %s' % (str(batch_prediction.shape), str(batch_prediction.dtype)))
-        logging.debug('batch_img: %s %s' % (str(batch_img.shape), str(batch_img.dtype)))
-        logging.debug('batch_label: %s %s' % (str(batch_label.shape), str(batch_label.dtype)))
-
-        r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
-        r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
-        r_batch_activations = np.reshape(batch_activations,
-                                         [-1, batch_activations.shape[2], batch_activations.shape[3]])
-        r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
-
-        out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
-                                  np.squeeze(img_util.to_rgb(r_batch_label)),
-                                  np.squeeze(img_util.to_rgb(r_batch_activations[..., 0, np.newaxis], normalize=True)),
-                                  np.squeeze(img_util.to_rgb(r_batch_activations[..., 1, np.newaxis], normalize=True)),
-                                  np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis]))
-                                  ), axis=1)
-
-        img_util.save_image(out_img, "%s/img_%s.png" % (args.test_dir, b))
-
-        # ###########################################################################
-        # CLOSE NET
-        # ###########################################################################
-
 
 def test_debug(sess, net_test):
     logging.info('#-----------------------------------------------#')
@@ -653,10 +602,6 @@ def test_debug_sampling(sess, net_test):
 
 
 
-
-
-
-
 def test_metrics(sess, net_test):
     logging.info('#-----------------------------------------------#')
     logging.info('#               Starting Testing (metrics)      #')
@@ -751,77 +696,6 @@ def test_metrics(sess, net_test):
     logging.debug('\naccuracy: %s, prec: %s, rec: %s \naccuracy_per_class %s, \nmean_iou %s' %
                           (str(c_accuracy), str(c_precision), str(c_recall),
                            str(c_accuracy_per_class), str(c_mean_iou)))
-
-
-# test with sampling for uncertainty (only makes sense when resample_n != None and keep_prob != 1.0
-def test_sampling(sess, net_test):
-    logging.info('#-----------------------------------------------#')
-    logging.info('#        Starting Testing with sampling         #')
-    logging.info('#-----------------------------------------------#')
-
-    # # init variables
-    # sess.run(tf.group(tf.global_variables_initializer(), tf.local_variables_initializer()))
-
-    trainer = SimpleTrainer(session=sess, train_dir=args.train_dir)
-    # load model (if None provided, gets latest from train_dir/checkpoints, if none found doesn't load)
-    trainer.load_checkpoint(args.checkpoint)
-
-    # ###########################################################################
-    # RUN UNET
-    # ###########################################################################
-    logging.debug("predicting, sampling %s x %s times, batch_size %s" %
-                  (str(opts_test.n_samples), str(opts_test.resample_n), str(opts_test.batch_size)))
-
-    sample_dir = args.test_dir + os.sep + 'samples'
-    os.mkdir(sample_dir)
-    for b in range(opts_test.n_samples):
-        try:
-            for s in range(opts_test.resample_n):
-                if s == 0:
-                    batch_img, batch_label, batch_pred = sess.run(
-                        [net_test.batch_img, net_test.batch_label, net_test.prediction])
-                    logging.debug('batch_img: %s %s' % (str(batch_img.shape), str(batch_img.dtype)))
-                    logging.debug('batch_label: %s %s' % (str(batch_label.shape), str(batch_label.dtype)))
-                    logging.debug('prediction: %s %s' % (str(batch_pred.shape), str(batch_pred.dtype)))
-                else:
-                    _, _, batch_pred = sess.run(
-                        [net_test.batch_img, net_test.batch_label, net_test.prediction])
-                    logging.debug('prediction: %s %s' % (
-                    str(prediction_samples[s, ...].shape), str(prediction_samples[s, ...].dtype)))
-
-                r_batch_pred = np.reshape(batch_pred, [-1, batch_pred.shape[2]])
-                if s == 0: prediction_samples = np.zeros([opts_test.resample_n] + list(r_batch_pred.shape), dtype=np.uint8)
-                prediction_samples[s, ...] = r_batch_pred
-
-                out_sample = img_util.to_rgb(prediction_samples[s, ...])
-                img_util.save_image(out_sample, "%s/sample_%s_%s.png" % (sample_dir, b, s))
-
-            logging.info('finished resampling (%s), calculating entropy' % (str(opts_test.resample_n)))
-
-            entropy = calc.entropy_bin_array(prediction_samples)
-            mean = np.mean(prediction_samples, axis=0)
-            std = np.std(prediction_samples, axis=0)
-
-            r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
-            r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
-
-            out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
-                                      np.squeeze(img_util.to_rgb(r_batch_label)),
-                                      np.squeeze(
-                                          img_util.to_rgb(mean)),
-                                      np.squeeze(
-                                          img_util.to_rgb_heatmap(entropy, rgb_256=True)),
-                                      np.squeeze(
-                                          img_util.to_rgb_heatmap(std, rgb_256=True))
-                                      ), axis=1)
-
-            img_util.save_image(out_img, "%s/img_%s.png" % (args.test_dir, b))
-        except tf.errors.OutOfRangeError:
-            break
-
-        # ###########################################################################
-        # CLOSE NET
-        # ###########################################################################
 
 
 def TEST(): pass # dummy function for PyCharm IDE

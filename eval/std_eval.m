@@ -13,7 +13,7 @@
 %
 % AUTHOR: Hannes Horneber
 
-
+clear all
 %% Initialize
 LIB_DIR = 'D:\Hannes Horneber\Documents\Wissen\Studium\Computer Science\WS17-18 STD\code\projects\win_tf_unet\eval\functions';
 
@@ -30,14 +30,21 @@ totalTime = tic;
 % NET_OUTPUT = 'data_net/ex5b_testset';
 % NET_OUTPUT = 'data_net/ex4_trainset';
 % NET_OUTPUT = 'data_all\unet_23_0227_bn9_sADp020_data1024\pred_04-23_0815_bn9_Dp020'
-NET_OUTPUT = 'data_all\unet_23_0227_bn9_sADp020_data1024\pred_04-23_1601_bn9_Dp020_30000'
-
+% NET_OUTPUT = 'data_all\unet_23_0227_bn9_sADp020_data1024\pred_04-23_1601_bn9_Dp020_30000'
+% NET_OUTPUT = 'data_all\unet_15_2028_bn9_sA\pred_04-25_0701_bn9__5000';
+% NET_OUTPUT = 'data_all\unet_15_2028_bn9_sA\pred_04-25_0704_bn9__30000';
+% NET_OUTPUT = 'data_tested/unet_15_2030_bn9_sADp050/pred_04-25_0750_bn9_Dp050_5000'
+NET_OUTPUT = 'D:\Hannes Horneber\Documents\Wissen\STUDIUM\Computer Science\WS17-18 STD\code\projects\EVAL\data_test\unet_21_1337_bn9_sADp050_AL50\pred_04-25_1922_bn9__AL50_30000';
+%% Settings I
 % specify directory to write outputs of script
 DIR_RES = [ NET_OUTPUT '/rerun' datestr(now,'yyyy-mm-dd-HH-MM-SS') ]; 
 
 % ##############################>   OUTPUT OPTIONS    <####################
 % OUTPUT OPTIONS (choose output: toggle true/false to plot or not)
 OUT_TILE =          true;      % tile itself
+OUT_UNC =           true;       % uncertainty output
+OUT_SOFT =          true;       % softmax output
+OUT_SOFT_ENTR =     false;       % softmax entropy
 OUT_OVL =           true;      % tile with segmentation overlay
 OUT_SEG =           true;      % segmentation itself
 OUT_TRUTH =         true;      % [labeled data] groundtruth
@@ -45,15 +52,22 @@ OUT_IOU =           true;      % [labeled data] IoU map
 OUT_OBJ =           true;      % [labeled data] object based stats
 OUT_OBJ_PLOT =      false;      % [labeled data] plot of iou_map with obj
 OUT_PIX_ROC =       true;      % [labeled data] pixelwise ROC
+OUT_PIX_BIN =       false;      % calibration plot
 OUT_FIG_CONF =      true;      % [labeled data] figure with confusion matrix
 OUT_FIG_CONF_PI =   false;      % [labeled data] ... per image
 OUT_FIG_ROC =       false;      % [labeled data] figure with ROC
 OUT_OUTPUT_LAYER =  false;      % pseudo-probability map for each class
 
-OBJ_IOU_THRESH =    0.1;
+OBJ_IOU_THRESH =    0.1;        % for obj based (for which IoU is an obj "found")
+N_BINS =            10;
+
 N_QUANTILES =       100;
-MAX_SCORE =         1.0;
-REMOVE_LOW_AP =     0.1;
+MAX_SCORE =         1.0;        % score max for scaling quantiles
+REMOVE_LOW_AP =     0.1;        % for removing bad curves
+INTERP_SAMPLES =    120;        % for averaging over curves
+INTERP_SAMPLES_PLOT = 360;      % for plotting averaged curve
+interp_x =    0:0.007:1;         % 143 samples
+interp_smooth_x = 0:0.03:1;      % 34 samples
 
 % specify filetype in which output graphics are generated
 % '-djpeg' / '-dtiff' / if saving with: print(handle, filename, format)
@@ -98,8 +112,14 @@ TFORMAT = ['%0' num2str(numel(num2str(length(data_n)))) '.f'];
 % elapsed_time = zeros(length(img_idx), 1);
 row = 1; % rownr for indexing arrays
 % n graphs * n quantiles (row) * (3 cols: precision, recall)
-graphs_uncertainty = zeros([data_n, N_QUANTILES, 2]);
-graphs_softmax = zeros([data_n, N_QUANTILES, 2]);
+
+%bin_scores = (0:N_BINS-1) * MAX_SCORE / N_BINS;
+% 1 = recall, 2 = precision, 
+% 3 = overall accuracy with increasing uncertainty (tp, tn / fp, fn)
+% 4 = frequency of correct classifications per bin (c1)
+% 5 = frequency of correct classifications per bin (both)
+graphs_uncertainty = zeros([data_n, N_QUANTILES, 5]);
+graphs_softmax = zeros([data_n, N_QUANTILES, 5]);
 quantiles = 0:N_QUANTILES-1;
 quantiles = quantiles * MAX_SCORE / N_QUANTILES;
 
@@ -118,47 +138,29 @@ for tile_i = 1:data_n
     label = boolean(label); %uint8(label);
     softmax = double(softmax);
     pred = boolean(pred); %uint8(pred);
+    % double channel so it has same shape as softmax (makes using it as score easier)
     uncertainty(:,:,2) = double(uncertainty(:,:));
     
 
-    % ##########################> PRINT TILE <#############################
+    % #########################> PRINT DATA  <#############################
     % print original tile (RGB and/or IRGB)
     if(OUT_TILE)
         % write tile without georef
         imwrite(tile(:,:,[1 2 3]), [tile_name '-a' OUT_TILE_FORMAT]);
     end
-
-    % #########################> PRINT OUTPUT <############################
-    % >>>>> PROBABILITY PER CLASS CLASS OUTPUT <<<<<<<
-    % needed for object score
-    % can be used to print the activations per class (before max)
-
-    % get output layer for each class
-    output_layers = softmax;
-
-    if(OUT_OUTPUT_LAYER)
-        % scale from 0 - 1 (softmax)
-        ctop = 1.0;
-        cbottom = 0.0;
-        % output mode single layers fixed scale
-        for i_layer = 1:NOUTCLASSES
-            if(VERBOSE); fprintf('  > softmax class %i\n', i_layer); end
-            % write result graphics
-            f = figure('visible', 'off', 'OuterPosition', [0, 0, 900, 900]);
-            a = axes;
-            colormap jet;
-            image(softmax(:,:,i_layer), 'cdatamapping', 'scaled')
-            % output mode single layers fixed scale
-            title(['Tile ' int2str(tile_i) ': output layer ' int2str(i_layer-1)]);
-            % shared color scale
-            caxis manual;
-            caxis([cbottom ctop]);          
-            colorbar('peer', a);
-            saveas(f, [tile_name '-z' num2str(i_layer) OUT_FIG_FORMAT]);
-            close(f);
-        end; clear i_layer;
+    if(OUT_UNC)
+        imwrite(imagesc2im(uncertainty(:,:,1), 0), [tile_name '-u' OUT_TILE_FORMAT]);
     end
-    
+    if(OUT_SOFT)
+        imwrite(imagesc2im(softmax(:,:,2), 0), [tile_name '-sm' OUT_TILE_FORMAT]);
+    end
+    if(OUT_SOFT_ENTR)
+        sm_entropy = - (softmax(:,:,1) * log(softmax(:,:,1)) +  (softmax(:,:,2) * log(softmax(:,:,2))));
+        sm_entropy = sm_entropy / max(sm_entropy(:));
+        sm_entropy(:,:,2) = sm_entropy;
+        imwrite(imagesc2im(sm_entropy(:,:,1), 0), [tile_name '-sme' OUT_TILE_FORMAT]);
+    end
+
     % ##########################> PROCESS PREDICTION <#####################
     % work with network output: create files, stats and graphs
     
@@ -281,10 +283,12 @@ for tile_i = 1:data_n
         softmax_map = softmax(:,:,class+1); % softmax_map for class
         %softmax_map_bg = softmax_netoutput(:,:,1); % softmax_map for background
         %softmax_img = imagesc2im(softmax_map, summer(256));
+        uncertainty_map = uncertainty(:,:,class+1);
         
         % assign scores to objects
         for i=1:length(objPred)   
             objPred(i).score = mean(softmax_map(objPred_map == i));
+            objPred(i).uncertainty = mean(uncertainty_map(objPred_map == i));
         end
 
 
@@ -334,11 +338,17 @@ for tile_i = 1:data_n
 %         figure(); imagesc(uncertainty(:,:,1))
 
         for g = 1:2
-            if g==1; score = uncertainty(:,:,1); 
-            else score = 1 - softmax(:,:,2); end
+            if g==1; 
+                score = uncertainty(:,:,1); 
+            else
+                score = 1 - softmax(:,:,2);
+%               score = sm_entropy(:,:,1);
+            end
             % allocate graph
             %graph(q_steps) = struct('quantile',[],'precision',[],'recall',[]);
             if nnz(label) && nnz(pred)
+%                  myplot = figure();
+%                  hold on;
                 % fill graph
                 for q = 1:N_QUANTILES
                     %graphs_uncertainty(tile_i,q,) = max_score * (q/q_steps);
@@ -371,19 +381,125 @@ for tile_i = 1:data_n
                         precision_val = 0.0;
                         recall_val = 0.0;
                     end
-                   
+
                     % compute prec/recall
                     if g==1; graphs_uncertainty(tile_i,q,1) = precision_val;
                     else graphs_softmax(tile_i,q,1) = precision_val; end
 
-                    if g==2; graphs_uncertainty(tile_i,q,2) = recall_val;
+                    if g==1; graphs_uncertainty(tile_i,q,2) = recall_val;
                     else graphs_softmax(tile_i,q,2) = recall_val; end
     %                 fprintf('precision %.3f / recall %.3f\n', precision_val, recall_val);
+                    
+                    % -------------------------------------------------
+                    % overall accuracy with increasing uncertainty
+                    preds = pred(score <= quantiles(q));
+                    truth = label(score <= quantiles(q));
+                    pred_tp_fn = preds(truth == true);
+                    truth_tp_fn = truth(truth == true);
+                    pred_tp_fp = preds(preds == true);
+                    truth_tp_fp = truth(preds == true);
+                    
+                    correct_tp_fn = nnz(pred_tp_fn == truth_tp_fn);
+%                     accuracy_tp_fn = correct_tp_fn / length(pred_tp_fn);
+                    
+                    correct_tp_fp = nnz(pred_tp_fp == truth_tp_fp);
+%                     accuracy_tp_fp = correct_tp_fp / length(pred_tp_fp);
+                    
+                    correct_tp_fp = nnz(pred_tp_fp == truth_tp_fp) + nnz(pred_tp_fn == truth_tp_fn);
+                    accuracy = correct_tp_fp / (length(truth_tp_fp) + length(truth_tp_fn));
+                    
+                    if g==1; graphs_uncertainty(tile_i,q,3) = accuracy;
+                    else graphs_softmax(tile_i,q,3) = accuracy; end
+                    
+                    % accuracy per uncertainty bin
+                    if q == 1
+                        bin_start = quantiles(q);
+                    else
+                        bin_start = quantiles(q - 1);
+                    end
+                    bin_end = quantiles(q);
+                    
+                    score_mask = true(size(score));
+                    score_mask(score <= bin_start) = false;
+                    score_mask(score > bin_end) = false;
+    
+                    preds = pred(score_mask);
+                    truth = label(score_mask);
+                    pred_tp_fn = preds(truth == true);
+                    truth_tp_fn = truth(truth == true);
+                    pred_tp_fp = preds(preds == true);
+                    truth_tp_fp = truth(preds == true);
+                    
+                    correct_tp_fn = nnz(pred_tp_fn == truth_tp_fn);
+                    accuracy_tp_fn = correct_tp_fn / length(pred_tp_fn);
+                    
+                    correct_tp_fp = nnz(pred_tp_fp == truth_tp_fp);
+                    accuracy_tp_fp = correct_tp_fp / length(pred_tp_fp);
+                    
+                    correct_tp_fp = nnz(pred_tp_fp == truth_tp_fp) + nnz(pred_tp_fn == truth_tp_fn);
+                    bin_accuracy = correct_tp_fp / (length(truth_tp_fp) + length(truth_tp_fn));
+                    
+%                     label_bin = label;
+%                     label_bin(~score_mask) = false;
+%                     pred_bin = pred;
+%                     pred_bin(~score_mask) = false;        
+%                     mask = zeros([size(label) 3]);
+%                     red = zeros(size(label));
+%                     red(score_mask) = true;
+%                     mask(:,:,1) = red;
+%                     mask(:,:,2) = label_bin;
+%                     mask(:,:,3) = pred_bin;
+%                     imshow(mask); 
+%                     title(['show | fn: ' num2str(accuracy_tp_fn) ' | fp: ' num2str(accuracy_tp_fp) ' | all: ' num2str(bin_accuracy)]);
+%                     waitforbuttonpress;
+                                        
+                    if g==1; graphs_uncertainty(tile_i,q,4) = bin_accuracy;
+                    else graphs_softmax(tile_i,q,4) = bin_accuracy; end
+                    
+                    
+                    % accuracy per uncertainty bin
+                    if q == 1
+                        bin_start = quantiles(q);
+                    else
+                        bin_start = quantiles(q - 1);
+                    end
+                    bin_end = quantiles(q);
+                    
+                    score_mask = true(size(score));
+                    score_mask(score <= bin_start) = false;
+                    score_mask(score > bin_end) = false;
+    
+                    preds = pred(score_mask);
+                    truth = label(score_mask);
+                    
+                    correct = nnz(preds == truth);
+                    bin_accuracy2 = correct / length(truth);
+                         
+%                     label_bin = label;
+%                     label_bin(~score_mask) = false;
+%                     pred_bin = pred;
+%                     pred_bin(~score_mask) = false;        
+%                     mask = zeros([size(label) 3]);
+%                     red = zeros(size(label));
+%                     red(score_mask) = true;
+%                     mask(:,:,1) = red;
+%                     mask(:,:,2) = label_bin;
+%                     mask(:,:,3) = pred_bin;
+%                     imshow(mask); 
+%                     title(['show | pixels: ' num2str( length(truth)) ' | correct: ' num2str(correct) ' | all: ' num2str(bin_accuracy2)]);
+%                     waitforbuttonpress;
+                                        
+                    if g==1; graphs_uncertainty(tile_i,q,5) = bin_accuracy2;
+                    else graphs_softmax(tile_i,q,5) = bin_accuracy2; end
+                    
                 end; clear precision_val recall_val
             else
                 fprintf('    skipping OUT_PIX_ROC\n');
             end
         end; clear g
+        
+%         plot(quantiles,graphs_softmax(tile_i,:,4))
+%         plot(quantiles,graphs_softmax(tile_i,:,5))
 %         figure(); imshow(label);
 %         figure(); imshow(pred);
     end
@@ -424,34 +540,49 @@ end % end loading and evaluating single tiles
 
 %% global pixelwise ROC out
 if(OUT_PIX_ROC)
-    INTERP_SAMPLES = 120;
-    recall_interp = 0:INTERP_SAMPLES-1; recall_interp = recall_interp / (INTERP_SAMPLES-1);
-    
+    clear prec_vals recall_vals bin_acc_vals
     % ###############################################
     % UNCERTAINTY GRAPH
     curves = 0;
     for tile_i = 1:data_n
-        % discard NaN and all-zero rows
+        tmp_prec_vals = graphs_uncertainty(tile_i,:,1);
+        tmp_recall_vals = graphs_uncertainty(tile_i,:,2);
+
+        % discard NaN and all-zero rows        
         if ~any(isnan(graphs_uncertainty(tile_i,:,1))) && any(graphs_uncertainty(tile_i,:,1)~=0) && any(graphs_uncertainty(tile_i,:,1)~=1)
             AP = trapz(graphs_uncertainty(tile_i,:,2),  graphs_uncertainty(tile_i,:,1));
             fprintf(['tile ' num2str(tile_i) ' | AP: ' num2str(AP) '\n']);
             
+            % handle curves that are flat
+            if AP == 0
+                [recall_vals_unique, ifirst, ~] = unique(tmp_recall_vals);
+                if length(recall_vals_unique) == 1
+                    tmp_recall_vals(ifirst) = 0.0;
+                    tmp_recall_vals(length(tmp_recall_vals)) = recall_vals_unique(1) + 0.0005;
+                    tmp_prec_vals(length(tmp_prec_vals)) = 0.0;
+                    AP = trapz(tmp_recall_vals,  tmp_prec_vals);
+                    fprintf(['fixed tile ' num2str(tile_i) ' | AP: ' num2str(AP) '\n']);
+                end
+            end
+            
             if AP > REMOVE_LOW_AP
                 curves = curves + 1;           
-                prec_vals(curves, :) = graphs_uncertainty(tile_i,:,1);
-                recall_vals(curves, :) = graphs_uncertainty(tile_i,:,2);
-
+                prec_vals(curves, :) = tmp_prec_vals; %graphs_uncertainty(tile_i,:,1);
+                recall_vals(curves, :) = tmp_recall_vals; %graphs_uncertainty(tile_i,:,2);
+                % for calib plot
+                bin_acc_vals(curves, :) = graphs_uncertainty(tile_i,:,5);
+                
                 recall_max = max(recall_vals(curves, :));
                 [recall_vals_unique, ia, ~] = unique(recall_vals(curves, :));
                 % interpolate if valid curve
-                if length(recall_vals_unique) > 5
+                if length(recall_vals_unique) >= 3
                     prec_vals_unique = prec_vals(curves, ia);
                     % add zero entries to guide interpolation
                     recall_vals_unique(length(recall_vals_unique)+1) = recall_max + 0.001;
                     prec_vals_unique(length(recall_vals_unique+1)) = 0.0;
                     recall_vals_unique(length(recall_vals_unique)+1) = 1.0;
                     prec_vals_unique(length(recall_vals_unique+1)) = 0.0;
-                    prec_vals_interp(curves, :) = interp1(recall_vals_unique, prec_vals_unique, recall_interp, 'previous', 'extrap');
+                    prec_vals_interp(curves, :) = interp1(recall_vals_unique, prec_vals_unique, interp_x, 'previous', 'extrap');
                 end
             end; clear ia recall_max recall_vals_unique prec_vals_unique
         end
@@ -466,6 +597,7 @@ if(OUT_PIX_ROC)
         end
     end; clear c interpolated
     
+    % -------------------------
     rocplot = figure();
     hold on;
     % plot ROC imagewise
@@ -473,23 +605,69 @@ if(OUT_PIX_ROC)
         plot(recall_vals(tile_i, :), prec_vals(tile_i, :), 'Color', [0.7, 0.7, 0.7]); % actual graph
     end
     % plot for average interpolated lines
-        for tile_i = 1:size(prec_vals_interp_clean, 1)
-            plot(recall_interp, prec_vals_interp_clean(tile_i, :), 'Color', [0.3, 0.3, 0.7]); % actual graph
-        end
+    % for tile_i = 1:size(prec_vals_interp_clean, 1)
+    %     plot(recall_interp, prec_vals_interp_clean(tile_i, :), 'Color', [0.3, 0.3, 0.7]); % actual graph
+    % end
     % plot average
-    AP_unc = trapz(vertcat(recall_interp), mean(prec_vals_interp_clean, 1)); % calc area under curve
-    plot(recall_interp, mean(prec_vals_interp_clean, 1), 'LineWidth', 2); % actual graph
+%     AP_unc = trapz(interp_x, mean(prec_vals_interp_clean, 1)); % calc area under curve
+%     plot(interp_x, mean(prec_vals_interp_clean, 1), 'LineWidth', 1, 'Color', [0.1 0.2 0.7]); % actual graph
+    % plot smooth average
+    prec_vals_interp_smooth = interp1(interp_x, mean(prec_vals_interp_clean, 1), interp_smooth_x, 'spline');
+    AP_unc2 = trapz(interp_smooth_x, prec_vals_interp_smooth); % calc area under curve
+    plot(interp_smooth_x, prec_vals_interp_smooth, 'LineWidth', 2, 'Color', [0.1 0.2 0.7]); % actual graph
     line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
     xlabel('recall') % x-axis label
     ylabel('precision') % y-axis label
-    title(['Precision/Recall with increasing uncertainty | AP: ' num2str(AP_unc)]);
+    title(['Precision/Recall with increasing uncertainty | AP: ' num2str(AP_unc2)]);
+%     axis([0.0, max(recall_vals(:))+0.1, 0.0, 1.0]);
     axis([0.0, 1.0, 0.0, 1.0]);
     grid on;
     
-    outname = [NET_OUTPUT '/' '_ROC_pix_uncertainty' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+    outname = [DIR_RES '/' '_ROC_pix_uncertainty_ctrl' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
     print( '-dpng', '-r200', outname);
     close(rocplot);
+    % ------------------------- ROC
+    rocplot = figure();
+    hold on;
+    % plot smooth average
+    prec_vals_interp_smooth = interp1(interp_x, mean(prec_vals_interp_clean, 1), interp_smooth_x, 'spline');
+    AP_unc2 = trapz(interp_smooth_x, prec_vals_interp_smooth); % calc area under curve
+    plot(interp_smooth_x, prec_vals_interp_smooth, 'LineWidth', 2, 'Color', [0.1 0.2 0.7]); % actual graph
+    line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
+    xlabel('recall') % x-axis label
+    ylabel('precision') % y-axis label
+    title(['Precision/Recall with increasing uncertainty | AP: ' num2str(AP_unc2)]);
+%     axis([0.0, max(recall_vals(:))+0.1, 0.0, 1.0]);
+    axis([0.0, 1.0, 0.0, 1.0]);
+    grid on;
     
+    outname = [DIR_RES '/' '_ROC_pix_uncertainty' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+    print( '-dpng', '-r200', outname);
+    close(rocplot);
+    % -------------------------
+    if(OUT_PIX_BIN)
+        % ------------------------- BIN CALIB
+        binplot = figure();
+        hold on;
+        for tile_i = 1:curves
+            plot(quantiles, bin_acc_vals(curves, :), 'Color', [0.7, 0.7, 0.7]); % per image plot
+        end
+        % plot smooth average
+        plot(interp_smooth_x, mean(bin_acc_vals, 1), 'LineWidth', 2, 'Color', [0.1 0.2 0.7]); % actual graph
+        line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
+        xlabel('certainty') % x-axis label
+        ylabel('frequency') % y-axis label
+        title(['uncertainty calibration']);
+        axis([0.0, 1.0, 0.0, 1.0]);
+        grid on;
+
+        outname = [NET_OUTPUT '/' '_CAL_pix_uncertainty' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+        print( '-dpng', '-r200', outname);
+        close(binplot);
+        % -------------------------
+    end
+    
+    clear prec_vals2 recall_vals2 prec_vals_interp2
     % ###############################################
     % SOFTMAX GRAPH
     curves2 = 0;
@@ -498,7 +676,9 @@ if(OUT_PIX_ROC)
         if ~any(isnan(graphs_softmax(tile_i,:,1))) && any(graphs_softmax(tile_i,:,1)~=0) && any(graphs_softmax(tile_i,:,1)~=1)
             AP = trapz(graphs_softmax(tile_i,:,2),  graphs_softmax(tile_i,:,1));
             fprintf(['softmax tile ' num2str(tile_i) ' | AP: ' num2str(AP) '\n']);
+            %plot(graphs_softmax(tile_i,:,2),  graphs_softmax(tile_i,:,1));
             
+
             if AP > REMOVE_LOW_AP
                 curves2 = curves2 + 1;
                 prec_vals2(curves2, :) = graphs_softmax(tile_i,:,1);
@@ -517,7 +697,7 @@ if(OUT_PIX_ROC)
                     prec_vals_unique(length(recall_vals_unique+1)) = 0.0;
                     recall_vals_unique(length(recall_vals_unique)+1) = 1.0;
                     prec_vals_unique(length(recall_vals_unique+1)) = 0.0;
-                    prec_vals_interp2(curves2, :) = interp1(recall_vals_unique, prec_vals_unique, recall_interp, 'previous', 'extrap');
+                    prec_vals_interp2(curves2, :) = interp1(recall_vals_unique, prec_vals_unique, interp_x, 'previous', 'extrap');
                 end
             end; clear recall_max recall_vals_unique prec_vals_unique
         end
@@ -534,72 +714,112 @@ if(OUT_PIX_ROC)
     end; clear c interpolated
     
     if curves2
+        % -------------------------
         rocplot2 = figure();
         hold on;
         % plot ROC imagewise
         for tile_i = 1:curves2
-            plot(recall_vals2(tile_i, :), prec_vals2(tile_i, :), 'Color', [0.7, 0.7, 0.1]); % actual graph
+            plot(recall_vals2(tile_i, :), prec_vals2(tile_i, :), 'Color', [0.7, 0.7, 0.2]); % actual graph
         end
         % plot for average interpolated lines
         for tile_i = 1:size(prec_vals_interp_clean2, 1)
-            plot(recall_interp, prec_vals_interp_clean2(tile_i, :)); % actual graph
+            plot(interp_x, prec_vals_interp_clean2(tile_i, :), 'Color', [0.7 0.7 0.2]); % actual graph
         end
         % plot average
-        AP_soft = trapz(vertcat(recall_interp), mean(prec_vals_interp_clean2, 1)); % calc area under curve
-        plot(recall_interp, mean(prec_vals_interp_clean2, 1), 'LineWidth', 2); % actual graph
+%         AP_soft = trapz(interp_x, mean(prec_vals_interp_clean2, 1)); % calc area under curve
+%         plot(interp_x, mean(prec_vals_interp_clean2, 1), 'LineWidth', 1, 'Color', [0.7 0.1 0.2]); % actual graph
+        % smooth average
+        prec_vals_interp_smooth2 = interp1(interp_x, mean(prec_vals_interp_clean2, 1), interp_smooth_x, 'spline');
+        AP_soft2 = trapz(interp_smooth_x, prec_vals_interp_smooth2); % calc area under curve
+        plot(interp_smooth_x, prec_vals_interp_smooth2, 'LineWidth', 2, 'Color', [0.7 0.1 0.2]); % actual graph
         line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
         xlabel('recall') % x-axis label
         ylabel('precision') % y-axis label
-        title(['ROC for softmax | AP: ' num2str(AP_soft)]);
+        title(['ROC for softmax | AP: ' num2str(AP_soft2)]);
+%         axis([0.0, max(recall_vals2(:))+0.1, 0.0, 1.0]);
         axis([0.0, 1.0, 0.0, 1.0]);
         grid on;
 
-        outname = [NET_OUTPUT '/' '_ROC_pix_softmax' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+        outname = [DIR_RES '/' '_ROC_pix_softmax_ctrl' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
         print( '-dpng', '-r200', outname);
         close(rocplot2);
-    
-        % ###############################################
-        % COMBINED GRAPH
-
+        
+        % -------------------------
         rocplot3 = figure();
         hold on;
-        % plot ROC imagewise
-        for tile_i = 1:curves
-            plot(recall_vals(tile_i, :), prec_vals(tile_i, :), 'Color', [0.8, 0.8, 0.8]); % actual graph
-        end
-        % plot average of uncertainty ROCs
-        plot(recall_interp, mean(prec_vals_interp_clean2, 1), 'LineWidth', 2); % actual graph
-        % plot average of softmax ROCs
-        plot(recall_interp, mean(prec_vals_interp_clean, 1), 'LineWidth', 2); % actual graph
+        % smooth average
+        prec_vals_interp_smooth2 = interp1(interp_x, mean(prec_vals_interp_clean2, 1), interp_smooth_x, 'spline');
+        AP_soft2 = trapz(interp_smooth_x, prec_vals_interp_smooth2); % calc area under curve
+        plot(interp_smooth_x, prec_vals_interp_smooth2, 'LineWidth', 2, 'Color', [0.7 0.1 0.2]); % actual graph
         line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
         xlabel('recall') % x-axis label
         ylabel('precision') % y-axis label
-        title('Precision / Recall for Uncertainty / Softmax');
+        title(['Precision/Recall for decreasing softmax | AP: ' num2str(AP_soft2)]);
+%         axis([0.0, max(recall_vals2(:))+0.1, 0.0, 1.0]);
+        axis([0.0, 1.0, 0.0, 1.0]);
+        grid on;
+
+        outname = [DIR_RES '/' '_ROC_pix_softmax' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+        print( '-dpng', '-r200', outname);
+        close(rocplot3);
+        % -------------------------
+        % ###############################################
+        % COMBINED GRAPH
+        % -------------------------
+        rocplot3 = figure();
+        hold on;
+        % plot ROC imagewise
+        % for tile_i = 1:curves
+        %     plot(recall_vals(tile_i, :), prec_vals(tile_i, :), 'Color', [0.8, 0.8, 0.8]); % actual graph
+        % end
+        % plot average of uncertainty ROCs
+        %plot(interp_x, mean(prec_vals_interp_clean2, 1), 'LineWidth', 2); % actual graph
+        plot(interp_smooth_x, prec_vals_interp_smooth, 'LineWidth', 2, 'Color', [0.1 0.2 0.7]); % actual graph
+        % plot average of softmax ROCs
+        %plot(interp_x, mean(prec_vals_interp_clean, 1), 'LineWidth', 2); % actual graph
+        plot(interp_smooth_x, prec_vals_interp_smooth2, 'LineWidth', 2, 'Color', [0.7 0.1 0.2]); % actual graph
+        line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
+        xlabel('recall') % x-axis label
+        ylabel('precision') % y-axis label
+        title(['PR for Uncertainty/Softmax | APunc ' num2str(AP_unc2) ' | APsoft '  num2str(AP_soft2)]);
         axis([0.0, 1.0, 0.0, 1.0]);
         grid on;
 
         outname = [NET_OUTPUT '/' '_ROC_pix_both' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
         print( '-dpng', '-r200', outname);
         close(rocplot3);
-
-
+        % -------------------------
+        
         % ###############################################
         % DIFFERENCE GRAPH
-        diff_val = mean(prec_vals_interp_clean, 1) - mean(prec_vals_interp_clean2, 1);
+       
+        % ------------------------
+        %diff_val = mean(prec_vals_interp_clean, 1) - mean(prec_vals_interp_clean2, 1);
+        diff_val_smooth = prec_vals_interp_smooth - prec_vals_interp_smooth2;
+        AP_diff = trapz(interp_smooth_x, diff_val_smooth);
         diffplot = figure();
         hold on;
-        plot(recall_interp, diff_val, 'LineWidth', 2); % actual graph
+        %plot(interp_x, diff_val, 'LineWidth', 2); % actual graph
+        plot(interp_smooth_x, diff_val_smooth, 'LineWidth', 2, 'Color', [0.6 0.2 0.6]); % actual graph
         xlabel('recall') % x-axis label
         ylabel('diff') % y-axis label
-        title('Difference predictive power: Softmax vs. uncertainty');
-        %axis([0.0, 1.0, 0.0, 1.0]);
+        title(['Expressiveness: Softmax vs. uncertainty  | AP ' num2str(AP_diff)]);
+%         axis([0.0, 1.0, 0.0, 1.0]);
         grid on;
 
         outname = [NET_OUTPUT '/' '_ROC_pix_diff' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
         print( '-dpng', '-r200', outname);
         close(diffplot);
+        % -------------------------
+        
+        % -------------------------
+        % SAVE VARIABLES
+        outname = [DIR_RES '/' '_pix_graph' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS')];
+        save(outname, 'interp_smooth_x', 'prec_vals_interp_smooth', 'prec_vals_interp_smooth2', 'diff_val_smooth', 'NET_OUTPUT')
+        % -------------------------
     end
 end
+
 %% global obj out
 
 if(OUT_OBJ)
@@ -614,26 +834,115 @@ if(OUT_OBJ)
             objPred_sorted(i).recall = length(find(vertcat(objPred_sorted(1:i).iou) > OBJ_IOU_THRESH)) / ...
                 length(objTruthClass);
             objPred_sorted(i).precision = length(find(vertcat(objPred_sorted(1:i).iou) > OBJ_IOU_THRESH)) / i;
-        end; clear i objPredClass objTruthClass;
+        end; clear i
 
         save('obj.mat','objPred_all','objTruth_all')
 
         % calc area under curve
         AP = trapz(vertcat(objPred_sorted.recall), vertcat(objPred_sorted.precision));
-
+        MR = max(vertcat(objPred_sorted.recall));
+        % -------------------------
         rocplot = figure();
         hold on;
-        plot(vertcat(objPred_sorted.recall), vertcat(objPred_sorted.precision)); % actual graph
+        plot(vertcat(objPred_sorted.recall), vertcat(objPred_sorted.precision), 'Color', [0.7 0.1 0.2]); % actual graph
         line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
         xlabel('recall') % x-axis label
         ylabel('precision') % y-axis label
-        title(['ROC sorted by IoU with AP ' num2str(AP)]);
+        title(['Precision/Recall with decreasing softmax | AP ' num2str(AP) ' | MR ' num2str(MR)]);
         axis([0, 1, 0, 1]);
         grid on;
-
-        outname = [NET_OUTPUT '/' '_ROC_obj' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+        
+        outname = [NET_OUTPUT '/' '_ROC_obj_softmax' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
         print( '-dpng', '-r200', outname);
         close(rocplot);
+        % -------------------------
+        
+        % repeat for uncertainty
+        [~,ord] = sort([objPredClass.uncertainty], 'ascend');
+        objPred_sorted2 = objPredClass(ord);
+
+        for i=1:length(objPred_sorted2)
+            objPred_sorted2(i).recall = length(find(vertcat(objPred_sorted2(1:i).iou) > OBJ_IOU_THRESH)) / ...
+                length(objTruthClass);
+            objPred_sorted2(i).precision = length(find(vertcat(objPred_sorted2(1:i).iou) > OBJ_IOU_THRESH)) / i;
+        end; clear i
+
+        save('obj.mat','objPred_all','objTruth_all')
+
+        % calc area under curve
+        AP2 = trapz(vertcat(objPred_sorted2.recall), vertcat(objPred_sorted2.precision));
+        MR2 = max(vertcat(objPred_sorted.recall));
+        % -------------------------
+        rocplot = figure();
+        hold on;
+        plot(vertcat(objPred_sorted2.recall), vertcat(objPred_sorted2.precision), 'Color', [0.1 0.2 0.7]); % actual graph
+        line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
+        xlabel('recall') % x-axis label
+        ylabel('precision') % y-axis label
+        title(['Precision/Recall with increasing uncertainty | AP ' num2str(AP2) ' | MR ' num2str(MR2)]);
+        axis([0, 1, 0, 1]);
+        grid on;
+        
+        outname = [DIR_RES '/' '_ROC_obj_uncertainty' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+        print( '-dpng', '-r200', outname);
+        close(rocplot);
+        % -------------------------
+        
+        % combined
+        % -------------------------
+        rocplot = figure();
+        hold on;
+        plot(vertcat(objPred_sorted.recall), vertcat(objPred_sorted.precision), 'Color', [0.7 0.1 0.2] ); % actual graph
+        plot(vertcat(objPred_sorted2.recall), vertcat(objPred_sorted2.precision), 'Color', [0.1 0.2 0.7]); % actual graph
+        line([0 1], [1 0], 'Color', [0.5 0.5 0.5], 'LineStyle', ':'); % linear decrease
+        xlabel('recall'); % x-axis label
+        ylabel('precision'); % y-axis label
+        %| AP ' num2str(AP) ' | MR ' num2str(MR) '| AP ' num2str(AP2) ' | MR ' num2str(MR2)
+        title('Precision/Recall for uncertainty/softmax');
+        axis([0, 1, 0, 1]);
+        grid on;
+        
+        outname = [DIR_RES '/' '_ROC_obj_both' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+        print( '-dpng', '-r200', outname);
+        close(rocplot);
+        
+        % ###############################################
+        % DIFFERENCE GRAPH
+        [obj_recall_vals_unique, ia, ~] = unique(vertcat(objPred_sorted.recall));
+        obj_prec_vals = vertcat(objPred_sorted.precision);
+        obj_prec_vals_unique = obj_prec_vals(ia);
+        
+        [obj_recall_vals_unique2, ia2, ~] = unique(vertcat(objPred_sorted2.recall));
+        obj_prec_vals2 = vertcat(objPred_sorted2.precision);
+        obj_prec_vals_unique2 = obj_prec_vals2(ia2);
+            
+        interp_soft = interp1(obj_recall_vals_unique, obj_prec_vals_unique, interp_x, 'nearest');
+        interp_unc = interp1(obj_recall_vals_unique2, obj_prec_vals_unique2, interp_x, 'nearest');
+        
+        % ------------------------
+        %diff_val = mean(prec_vals_interp_clean, 1) - mean(prec_vals_interp_clean2, 1);
+        diff_obj_roc = interp_unc - interp_soft;
+        AP_diff = trapz(interp_x, diff_obj_roc);
+        diffplot = figure();
+        hold on;
+        %plot(interp_x, diff_val, 'LineWidth', 2); % actual graph
+        plot(interp_x, diff_obj_roc, 'LineWidth', 2, 'Color', [0.6 0.2 0.6]); % actual graph
+        xlabel('recall') % x-axis label
+        ylabel('diff') % y-axis label
+        title(['Difference predictive power obj: Softmax vs. uncertainty | AP ' num2str(AP_diff)]);
+%         axis([0.0, 1.0, 0.0, 1.0]);
+        grid on;
+
+        outname = [NET_OUTPUT '/' '_ROC_obj_diff' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS') OUT_FIG_FORMAT];
+        print( '-dpng', '-r200', outname);
+        close(diffplot);
+        % -------------------------
+        
+        % -------------------------
+        % SAVE VARIABLES
+        outname = [DIR_RES '/' '_obj_sorted' '_' datestr(now,'dd-mm-yyyy-HH-MM-SS')];
+        save(outname, 'objPred_sorted', 'objPred_sorted2', 'diff_obj_roc', 'NET_OUTPUT')
+        % -------------------------
     end; clear class ord rocplot;
 end;
 
@@ -654,13 +963,14 @@ if((OUT_FIG_CONF || OUT_FIG_ROC))
             disp(ME.identifier);
             disp(ME.message);
         end
-    end; clear confusionplot;
+    end; clear confusionplot
     if(OUT_FIG_ROC)
         rocplot = plotroc(summary_groundtruth_oneHot',summary_segmentation_oneHot');
         saveas(rocplot, [NAME_RES '_RP' OUT_FIG_FORMAT]);
         close(rocplot)
     end; clear rocplot;
 end
+
 
 if(VERBOSE)
     fprintf('\nDONE\n');

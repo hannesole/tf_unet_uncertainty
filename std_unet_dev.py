@@ -197,8 +197,11 @@ try: opts_val = config_util.config_decorator(config['VAL'])
 except KeyError: opts_val = None
 
 # output opts to console
-print(config_util.opts_to_str(opts))
-
+print(config_util.opts_to_str(opts, 'DEFAULT'))
+if opts.train:
+    print(config_util.opts_to_str(opts_train, 'TRAIN'))
+if opts.test:
+    print(config_util.opts_to_str(opts_train, 'TEST'))
 # ######################################################################################################################
 # TRAINING
 # --------
@@ -336,10 +339,10 @@ if opts.train:
 
         # create network graph with data layer
         net = model.UNet(is_training=True, keep_prob=opts_train.keep_prob,
-                         n_contracting_blocks=opts.n_contracting_blocks,
-                         n_start_features=opts.n_start_features,
-                         norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
-                         aleatoric_sample_n=opts.aleatoric_sample_n,
+                         n_contracting_blocks=opts_train.n_contracting_blocks,
+                         n_start_features=opts_train.n_start_features,
+                         norm_fn=opts_train.norm_fn, normalizer_params=opts_train.norm_fn_params,
+                         aleatoric_sample_n=opts_train.aleatoric_sample_n,
                          copy_script_dir=args.code_copy_dir, debug=opts.debug,
                          opts_main=opts_train, opts_val=opts_val,
                          sess=sess, train_dir=args.train_dir
@@ -448,7 +451,7 @@ def test_debug(sess, net_test):
 
 
 # test with sampling for uncertainty (only makes sense when resample_n != None and keep_prob != 1.0
-def test_debug_sampling(sess, net_test):
+def test_debug_sampling_deprecated(sess, net_test):
     logging.info('#-----------------------------------------------#')
     logging.info('#        Starting Testing with sampling         #')
     logging.info('#-----------------------------------------------#')
@@ -596,6 +599,136 @@ def test_debug_sampling(sess, net_test):
         # ###########################################################################
         # CLOSE NET
         # ###########################################################################
+
+
+
+# test with sampling for uncertainty (only makes sense when resample_n != None and keep_prob != 1.0
+def test_debug_sampling(sess, net_test):
+    logging.info('#-----------------------------------------------#')
+    logging.info('#        Starting Testing with sampling         #')
+    logging.info('#-----------------------------------------------#')
+
+    # load model for testing (if None provided, searches in train_dir, if not found doesn't load)
+    trainer = SimpleTrainer(session=sess, train_dir=args.train_dir)
+    chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
+    args.test_dir = filesys.find_or_create_test_dir(args.test_dir, args.train_dir)
+
+    # add uncertainty op if supported (network trained with aleatoric loss)
+    if opts_test.aleatoric_sample_n is not None and opts_test.aleatoric_sample_n > 0:
+        # get uncertainty (entropy) and sampled, softmaxed output mask
+        net_batch_uncertainty, net_batch_softmax = uncertainty.aleatoric_entropy(net_test.output_mask,
+                                                              net_test.sigma_activations,
+                                                              opts_test.aleatoric_sample_n)
+        # create prediction from sampled, softmaxed output mask
+        net_batch_prediction = tf.argmax(tf.nn.softmax(net_batch_softmax), axis=-1, output_type=tf.int32)
+    else:
+        # add softmax op, default net prediction and dummy uncertainty
+        net_batch_softmax = tf.nn.softmax(net_test.output_mask)
+        net_batch_prediction = net_test.prediction
+        # for default net w/o aleatoric loss no uncertainty is defined. Can be generated with dropout (resample_n)
+        net_batch_uncertainty = tf.constant(0, shape=list(net_batch_softmax.shape)[0:3])
+
+    # ###########################################################################
+    # RUN UNET
+    # ###########################################################################
+    logging.debug("predicting: n_samples %s, resample_n %s, batch_size %s" %
+                  (str(opts_test.n_samples), str(opts_test.resample_n), str(opts_test.batch_size)))
+
+    # create folder to store samples in
+    if opts_test.resample_n is not None:
+        sample_dir = args.test_dir + os.sep + 'samples'
+        os.mkdir(sample_dir)
+
+    for b in range(opts_test.n_samples):
+        # GENERATE RESULTS
+        # ----------------
+        try:
+            # standard run (or first run if resampling, to get batch_img and batch_label once)
+            logging.debug("run ...")
+            batch_img, batch_label, batch_softmax, batch_prediction, batch_uncertainty \
+                = sess.run([net_test.batch_img, net_test.batch_label,
+                            net_batch_softmax, net_batch_prediction, net_batch_uncertainty])
+
+            # if resampling, create store to sample into
+            if opts_test.resample_n is not None:
+                r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
+                # init prediction_sample store
+                softmax_samples = np.zeros([opts_test.resample_n] + list(r_batch_softmax.shape), dtype=np.float32)
+                # store prediction for averaging
+                softmax_samples[0, ...] = r_batch_softmax
+
+                # start sampling (-1 because one run was already done)
+                for s in range(1,opts_test.resample_n):
+                    batch_softmax, _, _ \
+                        = sess.run([net_batch_softmax, net_test.prediction, net_batch_uncertainty])
+
+                    # store prediction
+                    r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
+                    softmax_samples[s, ...] = r_batch_softmax
+
+                    # write first 3 and last 3 samples to folder
+                    if s < 3 or s >= opts_test.resample_n - 3:
+                        # save sample images to sample folder
+                        out_sample = img_util.to_rgb(r_batch_softmax[..., 1, np.newaxis])
+                        img_util.save_image(out_sample, "%s/sample_%s_%s_pred.png" % (sample_dir, b, s))
+
+        except tf.errors.OutOfRangeError:
+            break
+
+        # PROCESS RESULTS
+        # ---------------
+        # reshape so that batch_size is merged into x dimension (images are concatenated along x dim)
+        r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
+        r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
+
+        # if resampling, create pred and uncertainty from samples
+        if opts_test.resample_n is not None:
+            # create mean of samples and save as r_batch_prediction
+            logging.info('resampled softmax (%s), averaging for uncertainty and pred' % (str(opts_test.resample_n)))
+
+            # compute epistemic uncertainty and overwrite (empty) network output uncertainty
+            r_batch_uncertainty, r_batch_softmax, r_batch_prediction = uncertainty.epistemic_entropy(softmax_samples)
+            logging.info('calculating epistemic entropy from %s pred samples' % (str(opts_test.resample_n)))
+        else:
+            r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
+            r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+            # append axis for easier processing in MATLAB (same rank as softmax)
+            batch_uncertainty = batch_uncertainty[..., np.newaxis]
+            r_batch_uncertainty = np.reshape(batch_uncertainty,
+                                             [-1, batch_uncertainty.shape[2], batch_uncertainty.shape[3]])
+
+        # WRITE RESULTS
+        # -------------
+        logging.debug('writing tile-file: %s/tile_%s.mat' % (args.test_dir, b))
+        logging.debug('  softmax_activations: %s %s' % (str(r_batch_softmax.shape), str(r_batch_softmax.dtype)))
+        logging.debug('  prediction: %s %s' % (str(r_batch_prediction.shape), str(r_batch_prediction.dtype)))
+        logging.debug('  img: %s %s' % (str(r_batch_img.shape), str(r_batch_img.dtype)))
+        logging.debug('  label: %s %s' % (str(r_batch_label.shape), str(r_batch_label.dtype)))
+        logging.debug('  uncertainty: %s %s' % (str(r_batch_uncertainty.shape), str(r_batch_uncertainty.dtype)))
+
+        # write matlab arrays
+        scipy.io.savemat("%s/tile_%02d.mat" % (args.test_dir, b), mdict={
+            'tile' : r_batch_img,
+            'label' : r_batch_label,
+            'pred' : r_batch_prediction,
+            'softmax' : r_batch_softmax,
+            'uncertainty' : r_batch_uncertainty
+        } )
+
+        # summary
+        out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
+                                  np.squeeze(img_util.to_rgb(r_batch_label)),
+                                  #np.squeeze(img_util.to_rgb(r_batch_softmax[..., 0, np.newaxis], normalize=True)),
+                                  np.squeeze(img_util.to_rgb(r_batch_softmax[..., 1, np.newaxis], normalize=True)),
+                                  np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis])),
+                                  np.squeeze(img_util.to_rgb(r_batch_uncertainty[..., np.newaxis]))
+                                  ), axis=1)
+        img_util.save_image(out_img, "%s/tile_%02d_summary.png" % (args.test_dir, b))
+
+        # ###########################################################################
+        # CLOSE NET
+        # ###########################################################################
+
 
 
 
@@ -821,3 +954,4 @@ if opts.debug and False:  # temporarily disabled
     logging.info('#-----------------------------------------------#')
 
 logging.info('\n\n ... done :)')
+print('Elapsed time since start: %.4f s' % (timer() - t_start))

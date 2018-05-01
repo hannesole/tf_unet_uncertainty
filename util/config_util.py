@@ -11,11 +11,11 @@ from collections import OrderedDict
 import configparser
 import logging
 
-def opts_to_str(opts, width = 96):
+def opts_to_str(opts, title='SCRIPT', width = 96):
     '''Prints the opts class as box with all settings'''
     # vars(opts) == opts.__dict__  # but in different order!
     my_opts = opts.get_attr_val_list()
-    opts_str = '_' * width + '\n| SCRIPT OPTIONS:' + ' ' * (width - 17 - 1) + '|'
+    opts_str = '_' * width + ('\n| %s OPTIONS:') % title  + ' ' * (width - 11 - len(title) - 1) + '|'
     for opt in my_opts:
         opts_str = opts_str + '\n|   ' + opt[0] + '.' * (width // 2 - len(opt[0]) - 5) + ':  ' \
                    + str(opt[1]).replace('\n', ' ') + ' ' * (width // 2 - len(str(opt[1])) - 3) + '|'

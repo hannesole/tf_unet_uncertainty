@@ -2,7 +2,7 @@ import os
 import shutil
 import logging
 import time
-import config_util
+from util import config_util
 
 def find_or_create_train_dir(name, output_dir, train_dir, continue_training=False):
     # create train directory train_dir if it doesn't exist
