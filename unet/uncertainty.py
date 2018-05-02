@@ -1,17 +1,33 @@
+# UNCERTAINTY
+# ====================
+#
+# Functions to calculate uncertainty loss or metrics.
+#
+# Author: Hannes Horneber
+# Date: 2018-03-18
+
 import tensorflow as tf
 import numpy as np
 import math
 
 def softmax_stable(logits, axis):
+    """
+    Stable implementation of softmax in Tensorflow.
+    Can be used if tf.nn.softmax is not an option.
+    """
     # subtract maximum to avoid too large exponents
     exps = tf.exp(logits - tf.reduce_max(logits, axis=axis))
     softmax = tf.divide(exps, tf.reduce_sum(exps, axis=axis))
     return softmax
 
+
 def regularize_sigma(sigma):
+    """
+    regularize sigma to a scale / range
+    currently only sigmoid
+    """
     # scale sigma_activations
     return tf.nn.sigmoid(sigma)
-    #return tf.multiply(sigma_activations, 0)
 
 
 def sample_corrupt_logits(logits, sigma, sample_n):
@@ -35,29 +51,6 @@ def sample_corrupt_logits(logits, sigma, sample_n):
     noise = tf.multiply(gaussian, sigma)
     # adding noise to logits
     return tf.add(logits, noise)
-
-
-def aleatoric_entropy(logits, sigma_activations, n_samples):
-    """
-
-    :param logits:
-    :param sigma_activations:
-    :param n_samples:
-    :return: entropy, sampled_logits_sm
-    """
-    sigma = regularize_sigma(sigma_activations)
-
-    # create N=[aleatoric_sample_n] of corrupted logits
-    sampled_logits = sample_corrupt_logits(logits, sigma, n_samples) # [samples, batch_size, x, y, classes]
-    # mean of samples
-    sampled_logits_mean = tf.reduce_mean(sampled_logits, axis=0)
-    # squash logits vector with softmax, dim = class_dim
-    sampled_logits_sm = tf.nn.softmax(sampled_logits_mean, dim=-1)
-
-    # entropy of mean of sampled logits
-    # per pixel entropy = - SUM_C [ p_c * log(p_c) ] with classes C = [0, ..., C]
-    entropy = tf.multiply(tf.reduce_sum(tf.multiply(sampled_logits_sm, tf.log(sampled_logits_sm)), axis=-1), -1)
-    return entropy, sampled_logits_mean
 
 
 def aleatoric_cross_entropy(logits, label_one_hot, sigma_activations, n_samples, regularization = None):
@@ -104,20 +97,38 @@ def aleatoric_cross_entropy(logits, label_one_hot, sigma_activations, n_samples,
     return aleatoric_CE_mean, sigma, sampled_logits
 
 
+def aleatoric_entropy(logits, sigma_activations, n_samples):
+    """
+    calculates entropy of a set of corrupted, softmaxed logits
+    Logits are corrupted [n_samples]-times with noise parameter [sigma_activations].
 
-def gaussian_entropy(sigma):
+    :param logits: (usually 4-D)-Tensor [batch-size, x, y, classes] of network activations
+    :param sigma_activations: 4-D-Tensor [batch-size, x, y, 1], network output for sigma
+    :param n_samples: number of samples for corruption
+    :return: entropy, sampled_logits_sm
     """
-    Entropy of Gaussian
-    Formula from: https://en.wikipedia.org/wiki/Normal_distribution
-    1/2 * log(2*pi*e*sigma_activations**2)
-    """
-    return tf.divide(tf.multiply(tf.square(sigma), (2*math.pi*math.e)), 2)
+    sigma = regularize_sigma(sigma_activations)
+
+    # create N=[aleatoric_sample_n] of corrupted logits
+    sampled_logits = sample_corrupt_logits(logits, sigma, n_samples) # [samples, batch_size, x, y, classes]
+    # mean of samples
+    sampled_logits_mean = tf.reduce_mean(sampled_logits, axis=0)
+    # squash logits vector with softmax, dim = class_dim
+    sampled_logits_sm = tf.nn.softmax(sampled_logits_mean, dim=-1)
+
+    # entropy of mean of sampled logits
+    # per pixel entropy = - SUM_C [ p_c * log(p_c) ] with classes C = [0, ..., C]
+    entropy = tf.multiply(tf.reduce_sum(tf.multiply(sampled_logits_sm, tf.log(sampled_logits_sm)), axis=-1), -1)
+    return entropy, sampled_logits_mean
 
 
 def epistemic_entropy(sampled_softmax):
     """
+    calculates entropy over a set of softmaxed logits.
+    This operates over a numpy array.
+    For epistemic entropy, you collect Tensorflow session outputs for the same image into a numpy array.
 
-    :param sampled_softmax_mean: [n_samples, x, y, n_classes]
+    :param sampled_softmax_mean: 4-D numpy array (not Tensor!): [n_samples, x, y, n_classes]
     :return: entropy, sampled_softmax_mean, prediction
     """
     # mean of samples
@@ -129,3 +140,12 @@ def epistemic_entropy(sampled_softmax):
     # per pixel entropy = - SUM_C [ p_c * log(p_c) ] with classes C = [0, ..., C]
     entropy = - np.sum(sampled_softmax_mean * np.nan_to_num(np.log(sampled_softmax_mean)), axis=-1)
     return entropy, sampled_softmax_mean, prediction
+
+
+def gaussian_entropy(sigma):
+    """
+    Entropy of Gaussian
+    Formula from: https://en.wikipedia.org/wiki/Normal_distribution
+    1/2 * log(2*pi*e*sigma_activations**2)
+    """
+    return tf.divide(tf.multiply(tf.square(sigma), (2*math.pi*math.e)), 2)

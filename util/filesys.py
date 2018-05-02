@@ -1,3 +1,14 @@
+# FILESYS
+# =============
+#
+# Functions to create directories.
+# These functions usually avoid overwriting of directories by generating unique names.
+# The function "find_or_create_config_path()" allows to create a string from config settings.
+#
+# Author: Hannes Horneber
+# Date: 2018-03-22
+
+
 import os
 import shutil
 import logging

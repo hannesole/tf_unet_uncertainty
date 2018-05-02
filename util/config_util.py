@@ -2,6 +2,9 @@
 # =========================
 #
 # Functions/classes to help handling configuration.
+# Uses the python configparser to read config from a .ini file.
+# A wrapper class (config_decorator) allows struct-like access to
+# the config.ini settings.
 #
 # Author: Hannes Horneber
 # Date: 2018-04-10

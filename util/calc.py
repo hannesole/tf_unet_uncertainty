@@ -1,3 +1,11 @@
+# CALC
+# =========================
+#
+# math helper functions (implementations of entropy
+#
+# Author: Hannes Horneber
+# Date: 2018-03-22
+
 import numpy as np
 from scipy.stats import entropy
 from math import log, e

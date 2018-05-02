@@ -1,3 +1,11 @@
+# DATA IMPORT
+# =============
+# Functions to find and read image data stored on disk.
+#
+# Author: Hannes Horneber
+# Date: 2018-03-18
+
+
 import cv2
 import numpy as np
 import logging
@@ -52,10 +60,6 @@ def create_img_provider(src_dir, loop=False, shuffle_data=False):
         yield load_image(img_list[img_i])
 
 
-# def load_image_no_unicolor(img):
-#     if
-#
-#     while
 
 def create_img_batch_provider(src_dir, batch_size, loop=False, shuffle_data=False, no_unicolor=True):
     img_list = _find_img_files(src_dir)

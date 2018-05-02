@@ -2,6 +2,8 @@
 # =========================
 #
 # Python (commandline) script for training and/or testing a Unet.
+# Commandline arguments allow to specify a network folder to start/continue training in a specific directory.
+# A config-file can be specified, otherwise the script looks for a config file "config.ini" in the script directory.
 #
 # Author: Hannes Horneber
 # Date: 2018-03-18
@@ -21,7 +23,6 @@ matplotlib.use('Agg')  # set this before any other module makes use of matplotli
 import numpy as np
 import scipy.io
 from timeit import default_timer as timer
-from collections import OrderedDict
 
 # check how long tensorflow import takes
 print('Importing tensorflow ...')
@@ -38,8 +39,7 @@ from util import calc
 from util import logs
 from util import filesys
 from util import tf_helpers
-# from unet import model
-from unet import model_dev as model
+from unet import model
 from unet import data_layers
 from unet import uncertainty
 from util.tfutils import SimpleTrainer
@@ -121,12 +121,11 @@ def _________________________OPTIONS___________________________(): pass  # dummy
 
 # -> Override CLI arguments (for convenience when running from IDE)
 PROJECT_DIR = '/misc/lmbraid19/hornebeh/std/projects/remote_deployment/win_tf_unet/'
-
 # args.output_dir = '/home/hornebeh/proj_tf_unet/output/'
 # args.output_dir = '/home/hornebeh/proj_tf_unet/output_scr/'
 
 # args.name = 'overwrite'
-# args.name = 'unet_' + time.strftime("%Y-%m-%d_%H%M") + '_sh-aug-kp09-60k'
+
 # generate name for new training by reading config
 args.name = 'unet_' + time.strftime("%d_%H%M") \
             + '_' + config_util.keystr_from_config(args.config, section='TRAIN')
@@ -159,7 +158,8 @@ args.code_copy_dir = filesys.find_or_create_code_copy_dir(
 class config_extended(config_util.config_decorator):
     """
     Wrapper class for control flow options and default config options.
-    It extends
+    It extends config_util.config_decorator to allow struct-like access to config.ini
+    but also adds additional script-specific attributes.
     """
 
     def __init__(self, config, default='DEFAULT'):
@@ -190,9 +190,12 @@ class config_extended(config_util.config_decorator):
 config = configparser.ConfigParser()
 config.read(filesys.find_or_create_config_path(args.train_dir, config_path=args.config))
 
+# opts works like the script main options, containing defaults and script specific attributes
 opts = config_extended(config, default='DEFAULT')
+# opts_test / train / val access settings that override defaults in the corresponding sections of config.ini
 opts_test = config_util.config_decorator(config['TEST'])
 opts_train = config_util.config_decorator(config['TRAIN'])
+# some versions of config.ini may not contain a VAL section
 try: opts_val = config_util.config_decorator(config['VAL'])
 except KeyError: opts_val = None
 
@@ -202,128 +205,12 @@ if opts.train:
     print(config_util.opts_to_str(opts_train, 'TRAIN'))
 if opts.test:
     print(config_util.opts_to_str(opts_train, 'TEST'))
+
 # ######################################################################################################################
 # TRAINING
 # --------
 def __________________________TRAIN______________________________(): pass  # dummy function for PyCharm IDE
 
-
-# core code for training
-def train_core(sess, net):
-    logging.info('#-----------------------------------------------#')
-    logging.info('#               Starting Training               #')
-    logging.info('#-----------------------------------------------#')
-
-    # create a tfutils.SimpleTrainer that handles the mainloop and manages checkpoints
-    trainer = SimpleTrainer(session=sess, train_dir=args.train_dir)
-    # load model for continued training (if None provided, searches in train_dir, if not found doesn't load)
-    chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
-    # init variables if no checkpoint was loaded
-    if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
-    logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized variables")
-
-    # set train_op and summaries
-    logging.info('Setup training op (set loss, global_step and tensorboard summaries)')
-    train_op, global_step, loss, merged_summary = \
-        net.create_train_op(opts_train, img_summary=True)
-
-    # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
-    tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
-    # initializing local variables might be needed for some metrics
-    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
-
-    # setup saver list
-    saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
-    saver_list.append(global_step)  # for easy output: import pprint; pprint.pprint(saver_list)
-
-    # create and setup validation ops
-    val_ops = net.setup_val_ops()
-    logging.info('Setup validation ops: ' + str(val_ops))
-
-    trainer.mainloop(
-        max_iter=opts_train.max_iter,
-        saver_interval=opts_train.saver_interval,
-        saver_var_list=saver_list,
-        train_ops=([train_op]),
-        display_str_ops=[('Loss', loss)],
-        display_interval=1,
-        runstats_interval=100,
-        trace_interval=100,
-        summary_int_ops=[(1, merged_summary)],
-        test_int_fn=val_ops
-    )
-
-
-# core code for training with debug store
-def train_debug(sess, net):
-    logging.info('#-----------------------------------------------#')
-    logging.info('#               Starting Training (debug)       #')
-    logging.info('#-----------------------------------------------#')
-
-    # create a tfutils.SimpleTrainer that handles the mainloop and manages checkpoints
-    trainer = SimpleTrainer(session=sess, train_dir=args.train_dir)
-
-    logging.info('Initializing or loading variables')
-    # TODO Debug saving method
-    saver = tf.train.Saver()
-    save_dir = args.train_dir + os.sep + "save"
-    save_path = save_dir + os.sep + "model.ckpt"
-    if os.path.exists(save_path):
-        try:
-            logging.info("Attempt restore safe debug model from: %s" % save_dir)
-            saver.restore(sess, save_dir + os.sep + "model.ckpt")
-            chkpt_loaded = True
-            logging.info(" -- Restored --")
-        except:
-            logging.info("Attempt restore with SimpleTrainer load from: %s" % args.checkpoint)
-            # load model for continued training (if None provided, searches in train_dir, if not found doesn't load)
-            chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
-            # init variables if no checkpoint was loaded
-    else:
-        chkpt_loaded = False
-
-    if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
-    logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized variables")
-
-    # set train_op and summaries
-    logging.info('Create Training step (set loss, summary and global_step)')
-    train_op, global_step, loss, merged_summary = \
-        net.create_train_op(opts_train.init_learning_rate, opts_train.optimizer,
-                            img_summary=True, metrics=True)
-
-    # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
-    tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
-    # initializing local variables might be needed for some metrics
-    tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
-
-    # setup saver list
-    saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
-    saver_list.append(global_step)  # for easy output: import pprint; pprint.pprint(saver_list)
-
-    # create and setup validation ops
-    val_ops = net.setup_val_ops()
-
-    trainer.mainloop(
-        max_iter=opts_train.max_iter,
-        saver_interval=opts_train.saver_interval,
-        saver_var_list=saver_list,
-        train_ops=([train_op]),
-        display_str_ops=[('Loss', loss)],
-        display_interval=1,
-        runstats_interval=100,
-        trace_interval=100,
-        summary_int_ops=[(1, merged_summary)],
-        test_int_fn=val_ops
-    )
-
-    # TODO Debug saving method
-    if not os.path.exists(save_dir):
-        os.mkdir(save_dir)
-    saver.save(sess, save_path)
-    logging.info("Safe debug model saved: %s" % save_path)
-
-
-def TRAIN(): pass # dummy function for PyCharm IDE
 if opts.train:
     logging.info('####################################################################')
     logging.info('#                            TRAINING                              #')
@@ -339,25 +226,61 @@ if opts.train:
 
         # create network graph with data layer
         net = model.UNet(is_training=True, keep_prob=opts_train.keep_prob,
-                         n_contracting_blocks=opts.n_contracting_blocks,
-                         n_start_features=opts.n_start_features,
-                         norm_fn=opts.norm_fn, normalizer_params=opts.norm_fn_params,
-                         aleatoric_sample_n=opts.aleatoric_sample_n,
+                         n_contracting_blocks=opts_train.n_contracting_blocks,
+                         n_start_features=opts_train.n_start_features,
+                         norm_fn=opts_train.norm_fn, normalizer_params=opts_train.norm_fn_params,
+                         aleatoric_sample_n=opts_train.aleatoric_sample_n,
                          copy_script_dir=args.code_copy_dir, debug=opts.debug,
                          opts_main=opts_train, opts_val=opts_val,
                          sess=sess, train_dir=args.train_dir
                          )
 
-
         if opts.prep:
             logging.info('#-X-------------- SETUP COMPLETE ---------------#')
             sys.exit()
 
-        if not opts.debug:
-            train_core(sess, net)
-        else:
-            train_debug(sess, net)
-            # train_own(sess, net)
+        logging.info('#-----------------------------------------------#')
+        logging.info('#               Starting Training               #')
+        logging.info('#-----------------------------------------------#')
+
+        # create a tfutils.SimpleTrainer that handles the mainloop and manages checkpoints
+        trainer = SimpleTrainer(session=sess, train_dir=args.train_dir)
+        # load model for continued training (if None provided, searches in train_dir, if not found doesn't load)
+        chkpt_loaded = trainer.load_checkpoint(args.checkpoint)
+        # init variables if no checkpoint was loaded
+        if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
+        logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized variables")
+
+        # set train_op and summaries
+        logging.info('Setup training op (set loss, global_step and tensorboard summaries)')
+        train_op, global_step, loss, merged_summary = \
+            net.create_train_op(opts_train, img_summary=True)
+
+        # in case any tf vars are not initialized. Specifically needed for ADAM if ADAM variables aren't stored/loaded
+        tf_helpers.initialize_uninitialized(sess, vars=tf.global_variables())
+        # initializing local variables might be needed for some metrics
+        tf_helpers.initialize_uninitialized(sess, vars=tf.local_variables())
+
+        # setup saver list
+        saver_list = tf.global_variables()  # tf.trainable_variables() might not contain all relevant variables
+        saver_list.append(global_step)  # for easy output: import pprint; pprint.pprint(saver_list)
+
+        # create and setup validation ops
+        val_ops = net.setup_val_ops()
+        logging.info('Setup validation ops: ' + str(val_ops))
+
+        trainer.mainloop(
+            max_iter=opts_train.max_iter,
+            saver_interval=opts_train.saver_interval,
+            saver_var_list=saver_list,
+            train_ops=([train_op]),
+            display_str_ops=[('Loss', loss)],
+            display_interval=1,
+            runstats_interval=100,
+            trace_interval=100,
+            summary_int_ops=[(1, merged_summary)],
+            test_int_fn=val_ops
+        )
 
     logging.info('#-X---------------------------------------------#')
     logging.info('#                Finish Training                #')
@@ -372,9 +295,16 @@ def ___________________________TEST______________________________(): pass  # dum
 # reset graph so that variables don't have to be reused (they will be restored from checkpoint)
 if opts.train: tf.reset_default_graph()
 
-def test_debug(sess, net_test):
+def test_plain(sess, net_test):
+    """
+    Simple feed-forward procedure
+   (doesn't support dropout sampling for epistemic uncertainty, but supports aleatoric uncertainty)
+
+    :param sess: Tensorflow session
+    :param net_test: network that is used for testing
+    """
     logging.info('#-----------------------------------------------#')
-    logging.info('#               Starting Testing (debug)        #')
+    logging.info('#               Starting Testing                #')
     logging.info('#-----------------------------------------------#')
 
     # load model for testing (if None provided, searches in train_dir, if not found doesn't load)
@@ -384,22 +314,26 @@ def test_debug(sess, net_test):
     if not chkpt_loaded: sess.run(tf.group(tf.global_variables_initializer()))
     logging.info("Loaded variables from checkpoint" if chkpt_loaded else "Randomly initialized (!) variables")
 
-    # add softmax op
-    net_batch_softmax = tf.nn.softmax(net_test.output_mask)
     # add uncertainty op if supported (network trained with aleatoric loss)
     if opts_test.aleatoric_sample_n is not None and opts_test.aleatoric_sample_n > 0:
-        net_batch_uncertainty = uncertainty.aleatoric_entropy(net_test.output_mask,
+        net_batch_uncertainty, net_batch_softmax = uncertainty.aleatoric_entropy(net_test.output_mask,
                                                               net_test.sigma_activations,
                                                               opts_test.aleatoric_sample_n)
     else:
+        # dummy uncertainty (if not resampling for epistemic and no aleatoric uncertainty)
         net_batch_uncertainty = \
             tf.constant(0, shape = [opts_test.batch_size, opts_test.shape_label[0], opts_test.shape_label[1]])
+        # add softmax op
+        net_batch_softmax = tf.nn.softmax(net_test.output_mask)
+
     # ###########################################################################
     # RUN UNET
     # ###########################################################################
     logging.debug("predicting, sampling %s times, batch_size %s" % (opts_test.n_samples, opts_test.batch_size))
 
     for b in range(opts_test.n_samples):
+        # GENERATE RESULTS
+        # ----------------
         try:
             logging.debug("run ...")
             batch_img, batch_label, batch_softmax, batch_prediction, batch_uncertainty \
@@ -409,26 +343,18 @@ def test_debug(sess, net_test):
             break
         logging.debug("... success")
 
+
+        # PROCESS RESULTS
+        # ---------------
         # reshape so that batch_size is merged into x dimension (images are concatenated along x dim)
-        #logging.debug('  uncertainty: %s %s' % (str(batch_uncertainty.shape), str(batch_uncertainty.dtype)))
-        batch_uncertainty = batch_uncertainty[..., np.newaxis]
+        batch_uncertainty = batch_uncertainty[..., np.newaxis] # 3D-Tensor [batch_size, x, y] -> 4D-Tensor [batch_size, x, y,1]
         r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
         r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
         r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
         r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
         r_batch_uncertainty = np.reshape(batch_uncertainty, [-1, batch_uncertainty.shape[2], batch_uncertainty.shape[3]])
 
-        import scipy.io
-        # matlab arrays
-        scipy.io.savemat("%s/tile_%02d.mat" % (args.test_dir, b), mdict={
-            'tile' : r_batch_img,
-            'label' : r_batch_label,
-            'pred' : r_batch_prediction,
-            'softmax' : r_batch_softmax,
-            'uncertainty' : r_batch_uncertainty
-        } )
-
-        logging.debug('writing tile-file: %s/tile_%s.mat' % (args.test_dir, b))
+        logging.debug('writing summary: s/tile_%02d_summary.png' % (args.test_dir, b))
         logging.debug('  softmax_activations: %s %s' % (str(r_batch_softmax.shape), str(r_batch_softmax.dtype)))
         logging.debug('  prediction: %s %s' % (str(r_batch_prediction.shape), str(r_batch_prediction.dtype)))
         logging.debug('  img: %s %s' % (str(r_batch_img.shape), str(r_batch_img.dtype)))
@@ -450,8 +376,17 @@ def test_debug(sess, net_test):
         # ###########################################################################
 
 
-# test with sampling for uncertainty (only makes sense when resample_n != None and keep_prob != 1.0
-def test_debug_sampling(sess, net_test):
+
+def test_sampling(sess, net_test):
+    """
+    Test net with sampling for uncertainty. 
+    Supports dropout sampling for epistemic loss (resample_n > 0 and keep_prob < 1.0)
+    and aleatoric uncertainty (aleatoric_samples > 0).
+     
+    :param sess: Tensorflow session
+    :param net_test: network that is used for testing
+    """
+    
     logging.info('#-----------------------------------------------#')
     logging.info('#        Starting Testing with sampling         #')
     logging.info('#-----------------------------------------------#')
@@ -491,45 +426,34 @@ def test_debug_sampling(sess, net_test):
         # GENERATE RESULTS
         # ----------------
         try:
-            # standard run (or first run if resampling, to get batch_img and batch_label once)
+            # standard run (or the first run, if resampling, to get batch_img and batch_label once)
             logging.debug("run ...")
             batch_img, batch_label, batch_softmax, batch_prediction, batch_uncertainty \
                 = sess.run([net_test.batch_img, net_test.batch_label,
                             net_batch_softmax, net_batch_prediction, net_batch_uncertainty])
 
-            # if resampling, create store to sample into
+            # if dropout resampling, create store to sample into
             if opts_test.resample_n is not None:
-                r_batch_pred = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
+                r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
                 # init prediction_sample store
-                prediction_samples = np.zeros([opts_test.resample_n] + list(r_batch_pred.shape), dtype=np.uint8)
+                softmax_samples = np.zeros([opts_test.resample_n] + list(r_batch_softmax.shape), dtype=np.float32)
                 # store prediction for averaging
-                prediction_samples[0, ...] = r_batch_pred
-                if opts_test.aleatoric_sample_n is not None:
-                    r_batch_uncertainty = np.reshape(batch_uncertainty, [-1, batch_uncertainty.shape[2]])
-                    # init prediction_sample store
-                    uncertainty_samples = np.zeros([opts_test.aleatoric_sample_n] + list(r_batch_uncertainty.shape), dtype=np.float32)
-                    # store uncertainty for averaging (comes as [batch_size x y])
-                    uncertainty_samples[0, ...] = r_batch_uncertainty
+                softmax_samples[0, ...] = r_batch_softmax
 
-                # start sampling (-1 because one run was already done)
+                # start sampling (start with 1, not 0, because one run was already done)
                 for s in range(1,opts_test.resample_n):
-                    batch_softmax, batch_prediction, batch_uncertainty \
+                    batch_softmax, _, _ \
                         = sess.run([net_batch_softmax, net_test.prediction, net_batch_uncertainty])
 
                     # store prediction
-                    r_batch_pred = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
-                    prediction_samples[s, ...] = r_batch_pred
-                    # save sample images to sample folder
-                    out_sample = img_util.to_rgb(prediction_samples[s, ...])
-                    img_util.save_image(out_sample, "%s/sample_%s_%s_pred.png" % (sample_dir, b, s))
+                    r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
+                    softmax_samples[s, ...] = r_batch_softmax
 
-                    if opts_test.aleatoric_sample_n is not None:
-                        # store uncertainty
-                        r_batch_uncertainty = np.reshape(batch_uncertainty, [-1, batch_uncertainty.shape[2]])
-                        uncertainty_samples[s, ...] = r_batch_uncertainty
+                    # write first 3 and last 3 control samples as images to folder
+                    if s < 3 or s >= opts_test.resample_n - 3:
                         # save sample images to sample folder
-                        out_sample = img_util.to_rgb(uncertainty_samples[s, ...])
-                        img_util.save_image(out_sample, "%s/sample_%s_%s_unc.png" % (sample_dir, b, s))
+                        out_sample = img_util.to_rgb(r_batch_softmax[..., 1, np.newaxis])
+                        img_util.save_image(out_sample, "%s/sample_%s_%s_pred.png" % (sample_dir, b, s))
 
         except tf.errors.OutOfRangeError:
             break
@@ -539,29 +463,17 @@ def test_debug_sampling(sess, net_test):
         # reshape so that batch_size is merged into x dimension (images are concatenated along x dim)
         r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
         r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
-        r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
 
         # if resampling, create pred and uncertainty from samples
         if opts_test.resample_n is not None:
             # create mean of samples and save as r_batch_prediction
-            logging.info('resampled pred (%s), averaging for pred' % (str(opts_test.resample_n)))
-            r_batch_prediction = np.mean(prediction_samples, axis=0)
-            #std_deviation = np.std(prediction_samples, axis=0)
+            logging.info('resampled softmax (%s), averaging for uncertainty and pred' % (str(opts_test.resample_n)))
 
-            if opts_test.aleatoric_sample_n is not None:
-                #uncertainty_samples = uncertainty_samples[..., np.newaxis]
-                # create mean of samples and save as r_batch_uncertainty
-                logging.info('calculating combined entropy from %s aleatoric samples' % (str(opts_test.aleatoric_sample_n)))
-                # create
-                r_batch_uncertainty = - np.sum(uncertainty_samples * np.nan_to_num(np.log(uncertainty_samples)), axis=0)
-                #r_batch_uncertainty = r_batch_uncertainty
-                r_batch_uncertainty /= np.max(r_batch_uncertainty)
-            else:
-                logging.info('calculating epistemic entropy from %s pred samples' % (str(opts_test.resample_n)))
-                # compute epistemic uncertainty and overwrite (empty) network output uncertainty
-                #TODO entropy with softmax? but which class?
-                r_batch_uncertainty = calc.entropy_bin_array(prediction_samples)
+            # compute epistemic uncertainty and overwrite (empty) network output uncertainty
+            r_batch_uncertainty, r_batch_softmax, r_batch_prediction = uncertainty.epistemic_entropy(softmax_samples)
+            logging.info('calculating epistemic entropy from %s pred samples' % (str(opts_test.resample_n)))
         else:
+            r_batch_softmax = np.reshape(batch_softmax, [-1, batch_softmax.shape[2], batch_softmax.shape[3]])
             r_batch_prediction = np.reshape(batch_prediction, [-1, batch_prediction.shape[2]])
             # append axis for easier processing in MATLAB (same rank as softmax)
             batch_uncertainty = batch_uncertainty[..., np.newaxis]
@@ -589,7 +501,6 @@ def test_debug_sampling(sess, net_test):
         # summary
         out_img = np.concatenate((np.squeeze(img_util.to_rgb(r_batch_img)),
                                   np.squeeze(img_util.to_rgb(r_batch_label)),
-                                  #np.squeeze(img_util.to_rgb(r_batch_softmax[..., 0, np.newaxis], normalize=True)),
                                   np.squeeze(img_util.to_rgb(r_batch_softmax[..., 1, np.newaxis], normalize=True)),
                                   np.squeeze(img_util.to_rgb(r_batch_prediction[..., np.newaxis])),
                                   np.squeeze(img_util.to_rgb(r_batch_uncertainty[..., np.newaxis]))
@@ -599,7 +510,6 @@ def test_debug_sampling(sess, net_test):
         # ###########################################################################
         # CLOSE NET
         # ###########################################################################
-
 
 
 def test_metrics(sess, net_test):
@@ -650,20 +560,6 @@ def test_metrics(sess, net_test):
              [sum(x) for x in zip(recall, c_recall)],
               c_accuracy_per_class + accuracy_per_class[0],
               c_mean_iou + mean_iou[0]]
-
-        # out_img = np.squeeze(img_util.to_rgb(batch_activations))
-        # img_util.save_image(out_img, "%s/img_%s_pred.png" % (args.test_dir, b))
-        # logging.debug('\naccuracy: %s, prec: %s, rec: %s \naccuracy_per_class %s, \nmean_iou %s' %
-        #               (str(accuracy), str(precision), str(recall),
-        #                str(accuracy_per_class), str(mean_iou)))
-        #logging.debug('batch_activations: %s %s' % (str(batch_activations.shape), str(batch_activations.dtype)))
-        #logging.debug('batch_prediction: %s %s' % (str(batch_prediction.shape), str(batch_prediction.dtype)))
-        #logging.debug('batch_img: %s %s' % (str(batch_img.shape), str(batch_img.dtype)))
-        #logging.debug('batch_label: %s %s' % (str(batch_label.shape), str(batch_label.dtype)))
-
-        # logging.debug('describe prediction_samples: ' + str(stats.describe(batch_activations)))
-        # logging.debug('describe prediction_samples[0]: ' + str(stats.describe(prediction_samples[0])))
-        # out_img = img_util.combine_img_prediction(batch_img, batch_label, batch_activations)
 
         r_batch_img = np.reshape(batch_img, [-1, batch_img.shape[2], batch_img.shape[3]])
         r_batch_label = np.reshape(batch_label, [-1, batch_label.shape[2], batch_label.shape[3]])
@@ -723,16 +619,8 @@ if opts.test:
                          opts_main=opts_test,
                          sess=sess, train_dir=args.train_dir)
 
-        # for hdf5 and feed_dict layers no coordinators need to be initialized
-        # different when using tfrecords
-        if opts.debug:
-            test_debug_sampling(sess, net)
-        else:
-            if opts_test.resample_n is not None:
-                test_sampling(sess, net)
-            else:
-                test_core(sess, net)
-
+        # run test function
+        test_sampling(sess, net)
 
     logging.info('#-X---------------------------------------------#')
     logging.info('#                Finish Testing                 #')
@@ -751,9 +639,11 @@ def __________________________DEBUG_____________________________(): pass  # dumm
 # reset graph so that variables don't have to be reused (they will be restored from checkpoint)
 if opts.train: tf.reset_default_graph()
 
+# optional debug code, here an example to test augmentation:
+# overwrite batch_size
 opts.batch_size = 5
 
-# core code for training
+# code to be run during tf session
 def DEBUG_core(sess):
     logging.info('#-----------------------------------------------#')
     logging.info('#                Start Debugging                #')
@@ -810,12 +700,12 @@ def DEBUG_core(sess):
         img_util.save_image(out_img, "%s/img_aug_%s.jpg" % (args.test_dir, str(bb)))
 
 
-# TODO: Remove debugging code
 if opts.debug and False:  # temporarily disabled
     logging.info('####################################################################')
     logging.info('#                           DEBUGGING                              #')
     logging.info('####################################################################')
 
+    # run tf session
     with tf.Session(config=opts.tf_config) as sess:
         DEBUG_core(sess)
 
@@ -824,3 +714,4 @@ if opts.debug and False:  # temporarily disabled
     logging.info('#-----------------------------------------------#')
 
 logging.info('\n\n ... done :)')
+print('Elapsed time since start: %.4f s' % (timer() - t_start))

@@ -31,7 +31,7 @@ from util import img_util
 from util import calc
 from util import logs
 #from unet import model
-from unet import model_dev as model
+from unet import model as model
 from unet import data_layers
 from util.tfutils import SimpleTrainer
 
